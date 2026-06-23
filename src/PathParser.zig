@@ -13,7 +13,7 @@ pub const Coord = struct {
     }
 };
 
-pub const ItemVal = union(enum) {
+pub const Item = union(enum) {
     abs_move: Coord,
     abs_line: Coord,
     abs_horizontal_line: f32,
@@ -33,13 +33,8 @@ pub const ItemVal = union(enum) {
     close,
 };
 
-const ItemType = @typeInfo(ItemVal).@"union".tag_type.?;
+const ItemType = std.meta.Tag(Item);
 const PathParser = @This();
-
-const Item = struct {
-    val: ItemVal,
-    args: []const u8,
-};
 
 pub fn init(data: []const u8) PathParser {
     return .{
@@ -47,7 +42,7 @@ pub fn init(data: []const u8) PathParser {
     };
 }
 
-pub fn next(self: *PathParser) !?ItemVal {
+pub fn next(self: *PathParser) !?Item {
     if (self.buf.empty()) return null;
 
     if (self.buf.takeOne(command_chars)) |idx| {
@@ -68,10 +63,7 @@ pub fn next(self: *PathParser) !?ItemVal {
             's' => self.state = .rel_cubic_bezier_seq,
             'a' => self.state = .rel_arc,
             'A' => self.state = .abs_arc,
-            'Z', 'z' => {
-                self.state = null;
-                return .close;
-            },
+            'Z', 'z' => self.state = .close,
             else => unreachable,
         }
     }
@@ -79,48 +71,33 @@ pub fn next(self: *PathParser) !?ItemVal {
     const state = self.state orelse return error.InvalidCommand;
 
     switch (state) {
-        inline .abs_move,
-        .abs_line,
-        .rel_move,
-        .rel_line,
-        => |t| {
-            return @unionInit(ItemVal, @tagName(t), try coord(&self.buf));
-        },
-        inline .abs_horizontal_line,
-        .abs_vertical_line,
-        .rel_horizontal_line,
-        .rel_vertical_line,
-        => |t| {
-            return @unionInit(ItemVal, @tagName(t), try coordElem(&self.buf));
-        },
-        inline .abs_quad_bezier,
-        .rel_quad_bezier,
-        .abs_cubic_bezier_seq,
-        .rel_cubic_bezier_seq,
-        => |t| {
-            return @unionInit(ItemVal, @tagName(t), .{
-                try coord(&self.buf),
-                try coord(&self.buf),
-            });
-        },
-        inline .abs_cubic_bezier, .rel_cubic_bezier => |t| {
-            return @unionInit(ItemVal, @tagName(t), .{
-                try coord(&self.buf),
-                try coord(&self.buf),
-                try coord(&self.buf),
-            });
-        },
-        .close => unreachable,
         inline else => |t| {
-            _ = args(&self.buf);
-            return t;
+            const FT = @FieldType(Item, @tagName(t));
+            const ret: FT = switch (FT) {
+                Coord => try coord(&self.buf),
+                f32 => try coordElem(&self.buf),
+                [2]Coord => .{
+                    try coord(&self.buf),
+                    try coord(&self.buf),
+                },
+                [3]Coord => .{
+                    try coord(&self.buf),
+                    try coord(&self.buf),
+                    try coord(&self.buf),
+                },
+                void => {
+                    _ = args(&self.buf);
+                },
+                else => @compileError("Unhandled type " ++ @typeName(FT)),
+            };
+            return @unionInit(Item, @tagName(t), ret);
         },
     }
 }
 
 fn digits(buf: *sphtud.lex.Buf) ?sphtud.lex.Range {
-    const digit_chars = "0123456789";
-    return buf.takeWhileAny(digit_chars);
+    comptime std.debug.assert('9' - '0' == 9);
+    return buf.takeWhileBetween('0', '9');
 }
 
 fn wsp(buf: *sphtud.lex.Buf) void {
