@@ -4,7 +4,10 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const sphtud_dep = b.dependency("sphtud", .{});
+    const sphtud_dep = b.dependency("sphtud", .{
+        .with_gl = true,
+        .with_glfw = true,
+    });
     const sphtud = sphtud_dep.module("sphtud");
 
     const exe = b.addExecutable(.{

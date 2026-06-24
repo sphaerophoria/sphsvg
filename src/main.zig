@@ -1,4 +1,5 @@
 const sphtud = @import("sphtud");
+const gl = sphtud.render.gl;
 const std = @import("std");
 const PathParser = @import("PathParser.zig");
 
@@ -19,22 +20,447 @@ fn ensureIsSvg(first_item: ?sphtud.xml.Item) !void {
     if (!std.mem.eql(u8, unwrapped.name, "svg")) return error.Invalid;
 }
 
-fn handlePath(xml_item: sphtud.xml.Item) !void {
+const xyt = sphtud.render.xyt_program;
+
+const Renderer = struct {
+    tl: Point,
+    br: Point,
+    prog: xyt.Program(Uniforms),
+    scratch_gl: *sphtud.render.GlAlloc,
+
+
+    const Uniforms = struct {
+        color: sphtud.math.Vec3,
+        transform: sphtud.math.Mat3x3,
+    };
+
+    const Path = sphtud.util.RuntimeSegmentedList(Action);
+    // FIXME: Conversion + real type for renderer
+    const Point = PathParser.Coord;
+
+    const CubicBezier = struct {
+        c1: Point,
+        c2: Point,
+        end: Point,
+    };
+
+    const QuadBezier = struct {
+        c: Point,
+        end: Point,
+    };
+
+
+    const Arc = struct {
+        // Start has to be on the elpise
+        rot: f32,
+        rx: f32,
+        ry: f32,
+        center: Point,
+        start_theta: f32, // Note semi-duplicated with cursor :)
+        delta_theta: f32,
+    };
+    pub const Action = union(enum) {
+        move: Point,
+        line_to: Point,
+        cubic_bezier: CubicBezier,
+        quad_bezier: QuadBezier,
+        arc: Arc,
+        close,
+    };
+
+    pub fn renderPath(self: *Renderer, scratch: std.mem.Allocator, path: Path, color: sphtud.math.Vec3) !void {
+        //var cursor = Point { .x = 0, .y = 0 };
+        // path points are defined in svg space
+        // gl points [-1, 1]
+
+        if (path.len == 0) return;
+
+        var cursor: Point = .{ .x = 0, .y = 0 };
+        var cursor_start: Point = cursor;
+        if (path.get(0) == .move) {
+            cursor_start = path.get(0).move;
+        }
+
+        var buf_data: std.ArrayList(xyt.Vertex) = .empty;
+        try buf_data.append(scratch, .{ .vPos = .{ cursor_start.x, cursor_start.y }, });
+
+        var it = path.iter();
+        while (it.next()) |inst| switch (inst.*) {
+            .move => |m| {
+                if (buf_data.items.len > 0) {
+                    try self.renderVertexList(buf_data.items, color);
+                    buf_data.clearRetainingCapacity();
+                    try buf_data.append(scratch, .{ .vPos = .{ m.x, m.y }, });
+                }
+                cursor = m;
+
+            },
+            .line_to => |m| {
+                cursor = m;
+                try buf_data.append(scratch, .{ .vPos = .{ cursor.x, cursor.y }, });
+            },
+            .cubic_bezier => |bezier| {
+                const start: sphtud.math.Vec2 = .{ cursor.x, cursor.y };
+                const c1: sphtud.math.Vec2 = .{ bezier.c1.x, bezier.c1.y };
+                const c2: sphtud.math.Vec2 = .{ bezier.c2.x, bezier.c2.y };
+                const end: sphtud.math.Vec2 = .{ bezier.end.x, bezier.end.y };
+
+                for (0..10) |i| {
+                    const t: sphtud.math.Vec2 = @splat(0.1 * @as(f32, @floatFromInt(i + 1)));
+
+                    const a = std.math.lerp(start, c1, t);
+                    const b = std.math.lerp(c1, c2, t);
+                    const c = std.math.lerp(c2, end, t);
+
+                    const d = std.math.lerp(a, b, t);
+                    const e = std.math.lerp(b, c, t);
+
+                    const p = std.math.lerp(d, e, t);
+                    try buf_data.append(scratch, .{ .vPos = p });
+                }
+
+                cursor = bezier.end;
+            },
+            .quad_bezier => {
+                unreachable;
+        },
+            .arc => |arc| {
+                for (0..10) |i| {
+                    const t: f32 = 0.1 * @as(f32, @floatFromInt(i + 1));
+                    const theta = arc.start_theta + arc.delta_theta * t;
+
+                    const rotation_mat = sphtud.math.Transform.rotate(arc.rot);
+                    // FIXME: Maybe mat2x2 apply would be nice here
+                    var val = rotation_mat.apply(.{arc.rx * @cos(theta), arc.ry * @sin(theta), 1});
+                    val += .{ arc.center.x, arc.center.y, 0 };
+
+                    try buf_data.append(scratch, .{ .vPos = .{val[0], val[1]} });
+                }
+                const last = buf_data.items[buf_data.items.len-1];
+                cursor.x = last.vPos[0];
+                cursor.y = last.vPos[1];
+
+            },
+            .close => {
+                cursor = cursor_start;
+                try buf_data.append(scratch, .{ .vPos = .{ cursor.x, cursor.y }, });
+            },
+        };
+
+        try self.renderVertexList(buf_data.items, color);
+    }
+
+    fn renderVertexList(self: *Renderer, buf_data: []const xyt.Vertex, color: sphtud.math.Vec3) !void {
+        const buf = try xyt.Buffer.init(self.scratch_gl, buf_data);
+
+        var s = try xyt.RenderSource.init(self.scratch_gl);
+        s.bindData(self.prog.handle(), buf);
+
+        // Center of image at 0,0
+        // Scale such that width/height are both 2
+        // Tl -> br
+        // width = br.x - tl.x
+        // width = br.x - tl.x
+        const cx = (self.tl.x + self.br.x) / 2.0;
+        const cy = (self.tl.y + self.br.y) / 2.0;
+        const width = self.br.x - self.tl.x;
+        const height = self.br.y - self.tl.y;
+        const transform = sphtud.math.Transform.translate(-cx, -cy)
+            .then(.scale(2.0 / width, -2.0 / height))
+        ;
+
+        self.prog.renderLineStrip(s, .{
+            .color = color,
+            .transform = transform.inner,
+        });
+    }
+};
+
+fn angleBetween(a: sphtud.math.Vec2, b: sphtud.math.Vec2) f32 {
+    const ret =  std.math.acos(sphtud.math.dot(sphtud.math.normalize(a), sphtud.math.normalize(b)));
+    return ret * std.math.copysign(@as(f32, 1.0), sphtud.math.cross2(a, b));
+}
+
+fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, renderer: *Renderer) !void {
+    const cp = scratch.checkpoint();
+    defer scratch.restore(cp);
+
     var attr_it = xml_item.attributeIt();
 
+    // FIXME: Find a reasonable upper bound
+    var render_path = try Renderer.Path.init(scratch.allocator(), .linear(scratch.allocator()), 16, 32 * 1024);
+    var cursor = Renderer.Point{ .x = 0,  .y = 0};
+    // FIXME: Default color maybe comes from renderer?
+    var color = sphtud.math.Vec3{1, 1, 1};
+
     while (try attr_it.next()) |attr| {
+        if (std.mem.eql(u8, attr.key, "fill")) blk: {
+            if (attr.val.len < 7 or attr.val[0] != '#') break :blk;
+
+            const rs = attr.val[1..3];
+            const gs = attr.val[3..5];
+            const bs = attr.val[5..7];
+
+            const r = try std.fmt.parseInt(u8, rs, 16);
+            const g = try std.fmt.parseInt(u8, gs, 16);
+            const b = try std.fmt.parseInt(u8, bs, 16);
+            color = .{ r, g, b };
+        }
+
         if (std.mem.eql(u8, attr.key, "d")) {
             std.debug.print("\n\nnew path\n", .{});
             var pp = PathParser.init(attr.val);
 
             while (try pp.next()) |item| {
+                switch(item) {
+                    .abs_move => |m| {
+                        try render_path.append(.{
+                            .move = .{
+                                .x = m.x,
+                                .y = m.y,
+                            },
+                        });
+                        cursor = .{ .x = m.x, .y = m.y };
+                    },
+                    .abs_line => |m| {
+                        try render_path.append(.{
+                            .line_to = .{
+                                .x = m.x,
+                                .y = m.y,
+                            },
+                        });
+                        cursor = .{ .x = m.x, .y = m.y };
+                    },
+                    .abs_horizontal_line => |x| {
+                        try render_path.append(.{
+                            .line_to = .{
+                                .x = x,
+                                .y = cursor.y,
+                            },
+                        });
+                        cursor.x = x;
+                    },
+                    .abs_vertical_line => |y| {
+                        try render_path.append(.{
+                            .line_to = .{
+                                .x = cursor.x,
+                                .y = y,
+                            },
+                        });
+                        cursor.y = y;
+                    },
+                    .abs_cubic_bezier => |b| {
+                        try render_path.append(.{
+                            .cubic_bezier = .{
+                                .c1 = b[0],
+                                .c2 = b[1],
+                                .end = b[2],
+                            },
+                        });
+                        cursor = .{ .x = b[2].x, .y = b[2].y };
+                    },
+                    .abs_quad_bezier => |b| {
+                        try render_path.append(.{
+                            .quad_bezier = .{
+                                .c = b[0],
+                                .end = b[1],
+                            },
+                        });
+                        cursor = .{ .x = b[1].x, .y = b[1].y };
+                    },
+                    .abs_cubic_bezier_seq => |b| {
+                        std.log.warn("skipping abs sequential bezier (need to reflect c1)\n", .{});
+                        cursor = b[1];
+                    },
+                    .abs_arc => {
+                        std.log.warn("skipping abs arc\n", .{});
+                    },
+                    .rel_move => |m| {
+                        cursor = .{ .x = cursor.x + m.x, .y = cursor.y + m.y };
+                        try render_path.append(.{
+                            .move = cursor,
+                        });
+                    },
+                    .rel_line => |m| {
+                        cursor = .{ .x = cursor.x + m.x, .y = cursor.y + m.y };
+                        try render_path.append(.{
+                            .line_to = cursor,
+                        });
+                    },
+                    .rel_horizontal_line => |x| {
+                        cursor.x += x;
+                        try render_path.append(.{
+                            .line_to = cursor,
+                        });
+                    },
+                    .rel_vertical_line => |y| {
+                        cursor.y += y;
+                        try render_path.append(.{
+                            .line_to = cursor,
+                        });
+                    },
+                    .rel_cubic_bezier => |b| {
+                        const c1 = Renderer.Point{ .x = cursor.x + b[0].x, .y = cursor.y + b[0].y };
+                        const c2 = Renderer.Point{ .x = cursor.x + b[1].x, .y = cursor.y + b[1].y };
+                        cursor.x += b[2].x;
+                        cursor.y += b[2].y;
+
+                        try render_path.append(.{
+                            .cubic_bezier = .{
+                                .c1 = c1,
+                                .c2 = c2,
+                                .end = cursor,
+                            },
+                        });
+                    },
+                    .rel_quad_bezier => |b| {
+                        const c1 = Renderer.Point{ .x = cursor.x + b[0].x, .y = cursor.y + b[0].y };
+                        cursor.x += b[1].x;
+                        cursor.y += b[1].y;
+
+                        try render_path.append(.{
+                            .quad_bezier = .{
+                                .c = c1,
+                                .end = cursor,
+                            },
+                        });
+                    },
+                    .rel_cubic_bezier_seq => |b| {
+                        const end_v = sphtud.math.Vec2 { cursor.x + b[1].x, cursor.y + b[1].y };
+                        const c2_v = sphtud.math.Vec2 { cursor.x + b[0].x, cursor.y + b[0].y };
+
+                        const end_c2 = c2_v - end_v;
+
+                        const cursor_v = sphtud.math.Vec2 { cursor.x, cursor.y };
+
+
+                        const start_end_dir = sphtud.math.normalize(end_v - cursor_v);
+                        const reflect_offs = start_end_dir * @as(sphtud.math.Vec2, @splat(2 * sphtud.math.dot(end_c2, start_end_dir)));
+                        const start_c2 = end_c2 + reflect_offs;
+                        const c1 = cursor_v + start_c2;
+
+                        try render_path.append(.{
+                            .cubic_bezier = .{
+                                .c1 = .{ .x = c1[0], .y = c1[1] },
+                                .c2 = .{ .x = cursor.x + b[0].x, .y = cursor.y + b[0].y },
+                                .end = .{ .x = cursor.x + b[1].x, .y = cursor.y + b[1].y },
+                            },
+                        });
+                        cursor.x += b[1].x;
+                        cursor.y += b[1].y;
+                    },
+                    .rel_arc => |rel_params| {
+                        const params = PathParser.Arc {
+                            .sweep_flag = rel_params.sweep_flag,
+                            .rx = rel_params.rx,
+                            .ry = rel_params.ry,
+                            .large_arc = rel_params.large_arc,
+                            .x_rot = rel_params.x_rot,
+                            .end = .{
+                                .x = cursor.x + rel_params.end.x,
+                                .y = cursor.y + rel_params.end.y,
+                            },
+                        };
+
+                        std.debug.print("converted rel params {any}\n", .{params});
+                        const half_x = (cursor.x - params.end.x) / 2.0;
+                        const half_y = (cursor.y - params.end.y) / 2.0;
+
+                        const x_rot_rad = params.x_rot * std.math.pi / 180.0;
+                        const cos_phi = @cos(x_rot_rad);
+                        const sin_phi = @sin(x_rot_rad);
+
+                        // step 1
+                        const x_prime = half_x * cos_phi + half_y * sin_phi;
+                        const y_prime = half_x * -sin_phi + half_y * cos_phi;
+
+                        const x_prime_2 = x_prime * x_prime;
+                        const y_prime_2 = y_prime * y_prime;
+
+                        //step 2
+                        const rx2 = params.rx * params.rx;
+                        const ry2 = params.ry * params.ry;
+
+                        var step_2_scale = @sqrt(
+                            (rx2 * ry2 - rx2 * y_prime_2 - ry2 * x_prime_2) /
+                            (rx2 * y_prime_2  + ry2 * x_prime_2)
+                        );
+
+                        if (params.large_arc == params.sweep_flag) {
+                            step_2_scale *= -1;
+                        }
+
+                        const cx_prime = step_2_scale * params.rx * y_prime / params.ry;
+                        const cy_prime = step_2_scale * -params.ry * x_prime / params.rx;
+
+                        // Step 3
+                        const avg_x = (cursor.x + params.end.x) / 2;
+                        const avg_y = (cursor.y + params.end.y) / 2;
+
+                        const cx = cx_prime * cos_phi + cy_prime * -sin_phi + avg_x;
+                        const cy = cy_prime * sin_phi + cy_prime * cos_phi + avg_y;
+
+
+                        // step 4
+                        const v1 = sphtud.math.Vec2{
+                            (x_prime - cx_prime) / params.rx,
+                            (y_prime - cy_prime) / params.ry,
+                        };
+                        const v2 = sphtud.math.Vec2{
+                            (-x_prime - cx_prime) / params.rx,
+                            (-y_prime - cy_prime) / params.ry,
+                        };
+
+                        const theta = angleBetween(.{1, 0}, v1);
+                        var delta_theta = angleBetween(v1, v2);
+                        if (!params.sweep_flag and delta_theta > 0) {
+                            delta_theta -= std.math.pi * 2;
+                        } else if (params.sweep_flag and delta_theta < 0) {
+                            delta_theta += std.math.pi * 2;
+                        }
+
+                        try render_path.append(.{
+                            .arc = .{
+                                .delta_theta = delta_theta,
+                                .start_theta = theta,
+                                .center = .{
+                                    .x = cx,
+                                    .y = cy,
+                                },
+                                .rx = params.rx,
+                                .ry = params.ry,
+                                .rot = params.x_rot,
+                            },
+                        });
+                        cursor = params.end;
+                    },
+                    .close => {
+                        try render_path.append(.close);
+                    },
+                }
                 std.debug.print("{any}\n", .{item});
             }
         }
     }
+
+    try renderer.renderPath(scratch.allocator(), render_path, color);
 }
 
+pub const solid_color_frag =
+    \\#version 330
+    \\out vec4 fragment;
+    \\uniform vec3 color;
+    \\void main()
+    \\{
+    \\    fragment = vec4(color, 1.0);
+    \\}
+;
+
+
 pub fn main(init: std.process.Init) !void {
+    var allocators: sphtud.render.AppAllocators = undefined;
+    try allocators.initPinned(1 * 1024 * 1024);
+
     const svg_data = try loadSvg(init.arena.allocator());
     var svg_reader = std.Io.Reader.fixed(svg_data);
 
@@ -44,6 +470,23 @@ pub fn main(init: std.process.Init) !void {
     const dw = &discarding.writer;
 
     try ensureIsSvg(try parser.next(dw));
+
+    var window: sphtud.window.Window = undefined;
+    try window.initPinned("sphsvg", 800, 800);
+
+    try sphtud.render.initGl(window.glLoader());
+
+    gl.glClearColor(0, 0, 0, 1);
+    gl.glClear(gl.GL_COLOR_BUFFER_BIT);
+
+    var renderer = Renderer{
+        .prog = try .init(&allocators.root_gl, solid_color_frag),
+        .scratch_gl = &allocators.scratch_gl,
+        .tl = .{ .x = 0, .y = 0 },
+        .br = .{ .x = 128, .y = 128 },
+    };
+
+    //try renderer.renderPath(.empty, .{ 1, 0, 0 });
 
     while (try parser.next(&discarding.writer)) |elem| switch (elem.type) {
         .xml_decl => {},
@@ -56,7 +499,7 @@ pub fn main(init: std.process.Init) !void {
 
             switch (known) {
                 .path => {
-                    try handlePath(elem);
+                    try handlePath(allocators.scratch.linear(), elem, &renderer);
                 },
             }
         },
@@ -65,7 +508,32 @@ pub fn main(init: std.process.Init) !void {
         .comment => {},
     };
 
+    //{
+    //    var path = try Renderer.Path.init(allocators.scratch.allocator(), .linear(allocators.scratch.allocator()), 16, 1024);
+    //    try path.append(.{
+    //        .arc = .{
+    //            .center = .{ .x = 64, .y = 64 },
+    //            .rx = 50,
+    //            .ry = 32,
+    //            .start_theta = 0,
+    //            .delta_theta = 2 * std.math.pi,
+    //            .rot = std.math.pi / 4.0,
+    //        },
+    //    });
+
+    //    try renderer.renderPath(allocators.scratch.allocator(), path, .{ 1, 1, 1 });
+    //}
+
+    window.swapBuffers();
+
     //std.debug.print("{s}\n", .{svg_data});
+    //
+    while (!window.closed()) {
+        try sphtud.io.nanosleep(.fromMilliseconds(50));
+        window.queue.head = 0;
+        window.queue.tail = 0;
+        window.pollEvents();
+    }
 }
 
 test {

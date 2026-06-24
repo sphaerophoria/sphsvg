@@ -13,6 +13,15 @@ pub const Coord = struct {
     }
 };
 
+pub const Arc = struct {
+    rx: f32,
+    ry: f32,
+    x_rot: f32,
+    large_arc: bool,
+    sweep_flag: bool,
+    end: Coord,
+};
+
 pub const Item = union(enum) {
     abs_move: Coord,
     abs_line: Coord,
@@ -21,7 +30,7 @@ pub const Item = union(enum) {
     abs_cubic_bezier: [3]Coord,
     abs_quad_bezier: [2]Coord,
     abs_cubic_bezier_seq: [2]Coord,
-    abs_arc,
+    abs_arc: Arc,
     rel_move: Coord,
     rel_line: Coord,
     rel_horizontal_line: f32,
@@ -29,7 +38,7 @@ pub const Item = union(enum) {
     rel_cubic_bezier: [3]Coord,
     rel_quad_bezier: [2]Coord,
     rel_cubic_bezier_seq: [2]Coord,
-    rel_arc,
+    rel_arc: Arc,
     close,
 };
 
@@ -85,6 +94,17 @@ pub fn next(self: *PathParser) !?Item {
                     try coord(&self.buf),
                     try coord(&self.buf),
                 },
+                Arc => blk: {
+
+                    break :blk .{
+                        .rx = try coordElem(&self.buf),
+                        .ry = try coordElem(&self.buf),
+                        .x_rot = try coordElem(&self.buf),
+                        .large_arc = try flag(&self.buf),
+                        .sweep_flag = try flag(&self.buf),
+                        .end = try coord(&self.buf),
+                    };
+                },
                 void => {
                     _ = args(&self.buf);
                 },
@@ -107,6 +127,16 @@ fn wsp(buf: *sphtud.lex.Buf) void {
 
 fn sign(buf: *sphtud.lex.Buf) ?sphtud.lex.Idx {
     return buf.takeOne("+-");
+}
+
+fn flag(buf: *sphtud.lex.Buf) !bool {
+    wsp(buf);
+    const idx = buf.takeOne("01") orelse return error.Invalid;
+    switch (idx.data(buf.*)) {
+        '0' => return false,
+        '1' => return true,
+        else => return error.Invalid,
+    }
 }
 
 fn coordElem(buf: *sphtud.lex.Buf) !f32 {
