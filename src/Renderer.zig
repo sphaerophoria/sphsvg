@@ -8,7 +8,7 @@ br: Point,
 prog: xyt.Program(Uniforms),
 scratch_gl: *sphtud.render.GlAlloc,
 
-const bezier_resolution = 10;
+const bezier_resolution = 20;
 
 const Renderer = @This();
 
@@ -92,21 +92,17 @@ pub fn renderPath(self: *Renderer, scratch: std.mem.Allocator, path: Path, color
             unreachable;
         },
         .arc => |arc| {
-            const rotation_mat = sphtud.math.Transform.rotate(arc.rot);
+            const transform = sphtud.math.Transform.rotate(arc.rot).then(
+                .translate(arc.center[0], arc.center[1]),
+            );
 
-            var last = blk: {
-                var val = rotation_mat.apply(.{arc.rx * @cos(arc.start_theta), arc.ry * @sin(arc.start_theta), 1});
-                val += .{ arc.center[0], arc.center[1], 0 };
-                break :blk val;
-            };
+            var last = transform.apply(.{arc.rx * @cos(arc.start_theta), arc.ry * @sin(arc.start_theta), 1});
 
             for (0..bezier_resolution) |i| {
                 const t: f32 = 1.0 / @as(f32, bezier_resolution) * @as(f32, @floatFromInt(i + 1));
                 const theta = arc.start_theta + arc.delta_theta * t;
 
-                // FIXME: Maybe mat2x2 apply would be nice here
-                var val = rotation_mat.apply(.{arc.rx * @cos(theta), arc.ry * @sin(theta), 1});
-                val += .{ arc.center[0], arc.center[1], 0 };
+                const val = transform.apply(.{arc.rx * @cos(theta), arc.ry * @sin(theta), 1});
 
                 try buf_data.append(scratch, .{ .vPos = .{last[0], last[1]} });
                 try buf_data.append(scratch, .{ .vPos = .{val[0], val[1]} });
