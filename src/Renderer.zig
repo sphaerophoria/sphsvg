@@ -5,6 +5,8 @@ const xyt = sphtud.render.xyt_program;
 
 tl: Point,
 br: Point,
+// FIXME: If this renderer is for a specific image, than the program should be
+// shared between other renderers
 prog: xyt.Program(Uniforms),
 scratch_gl: *sphtud.render.GlAlloc,
 

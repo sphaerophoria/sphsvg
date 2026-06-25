@@ -16,17 +16,103 @@ fn loadSvg(alloc: std.mem.Allocator) ![]const u8 {
     return try r.allocRemaining(alloc, .unlimited);
 }
 
-fn ensureIsSvg(first_item: ?sphtud.xml.Item) !void {
-    const unwrapped = first_item orelse return error.Invalid;
-    if (unwrapped.type != .element_start) return error.Invalid;
-    if (!std.mem.eql(u8, unwrapped.name, "svg")) return error.Invalid;
-}
-
 const xyt = sphtud.render.xyt_program;
 
 fn angleBetween(a: sphtud.math.Vec2, b: sphtud.math.Vec2) f32 {
     const ret =  std.math.acos(sphtud.math.dot(sphtud.math.normalize(a), sphtud.math.normalize(b)));
     return ret * std.math.copysign(@as(f32, 1.0), sphtud.math.cross2(a, b));
+}
+
+pub fn renderSvg(scratch: sphtud.alloc.LinearAllocator, gl_alloc: *sphtud.render.GlAlloc, scratch_gl: *sphtud.render.GlAlloc, r: *std.Io.Reader) !void {
+    var reader = try SvgReader.init(r);
+    var renderer = Renderer{
+        .prog = try .init(gl_alloc, solid_color_frag),
+        .scratch_gl = scratch_gl,
+        .tl = .{reader.view_box.min_x, reader.view_box.min_y },
+        .br = .{ reader.view_box.min_x + reader.view_box.width, reader.view_box.min_y + reader.view_box.height },
+    };
+
+    while (try reader.next()) |elem| switch (elem) {
+        .path => |path| {
+            try handlePath(scratch, path, &renderer);
+        },
+    };
+}
+
+fn reflectCubicBezier(start: sphtud.math.Vec2, c2: sphtud.math.Vec2, end: sphtud.math.Vec2) sphtud.math.Vec2 {
+    const end_c2 = c2 - end;
+    const start_end_dir = sphtud.math.normalize(end - start);
+    const reflect_offs = start_end_dir * @as(sphtud.math.Vec2, @splat(2 * sphtud.math.dot(end_c2, start_end_dir)));
+    const start_c2 = end_c2 + reflect_offs;
+    return start + start_c2;
+}
+
+fn svgToRenderArc(cursor: sphtud.math.Vec2, params: PathParser.Arc) Renderer.Arc {
+    // https://www.w3.org/TR/SVG2/implnote.html#ArcImplementationNotes
+    // Section B.2.3
+    const half_x = (cursor[0] - params.end[0]) / 2.0;
+    const half_y = (cursor[1] - params.end[1]) / 2.0;
+
+    const x_rot_rad = params.x_rot * std.math.pi / 180.0;
+    const cos_phi = @cos(x_rot_rad);
+    const sin_phi = @sin(x_rot_rad);
+
+    // step 1
+    const x_prime = half_x * cos_phi + half_y * sin_phi;
+    const y_prime = half_x * -sin_phi + half_y * cos_phi;
+
+    const x_prime_2 = x_prime * x_prime;
+    const y_prime_2 = y_prime * y_prime;
+
+    //step 2
+    const rx2 = params.rx * params.rx;
+    const ry2 = params.ry * params.ry;
+
+    var step_2_scale = @sqrt(
+        (rx2 * ry2 - rx2 * y_prime_2 - ry2 * x_prime_2) /
+        (rx2 * y_prime_2  + ry2 * x_prime_2)
+    );
+
+    if (params.large_arc == params.sweep_flag) {
+        step_2_scale *= -1;
+    }
+
+    const cx_prime = step_2_scale * params.rx * y_prime / params.ry;
+    const cy_prime = step_2_scale * -params.ry * x_prime / params.rx;
+
+    // Step 3
+    const avg_x = (cursor[0] + params.end[0]) / 2;
+    const avg_y = (cursor[1] + params.end[1]) / 2;
+
+    const cx = cx_prime * cos_phi + cy_prime * -sin_phi + avg_x;
+    const cy = cy_prime * sin_phi + cy_prime * cos_phi + avg_y;
+
+    // step 4
+    const v1 = sphtud.math.Vec2{
+        (x_prime - cx_prime) / params.rx,
+        (y_prime - cy_prime) / params.ry,
+    };
+    const v2 = sphtud.math.Vec2{
+        (-x_prime - cx_prime) / params.rx,
+        (-y_prime - cy_prime) / params.ry,
+    };
+
+    const theta = angleBetween(.{1, 0}, v1);
+    var delta_theta = angleBetween(v1, v2);
+    if (!params.sweep_flag and delta_theta > 0) {
+        delta_theta -= std.math.pi * 2;
+    } else if (params.sweep_flag and delta_theta < 0) {
+        delta_theta += std.math.pi * 2;
+    }
+
+    return .{
+        .delta_theta = delta_theta,
+        .start_theta = theta,
+        .center = .{ cx, cy },
+        .rx = params.rx,
+        .ry = params.ry,
+        .rot = params.x_rot,
+    };
 }
 
 fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, renderer: *Renderer) !void {
@@ -111,11 +197,24 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
                 });
             },
             .abs_cubic_bezier_seq => |b| {
-                std.log.warn("skipping abs sequential bezier (need to reflect c1)\n", .{});
+                const c1 = reflectCubicBezier(cursor, b[0], b[1]);
+
+                try render_path.append(.{
+                    .cubic_bezier = .{
+                        .start = cursor,
+                        .c1 = c1,
+                        .c2 = b[0],
+                        .end = b[1],
+                    },
+                });
                 cursor = b[1];
             },
-            .abs_arc => {
-                std.log.warn("skipping abs arc\n", .{});
+            .abs_arc => |params| {
+                try render_path.append(.{
+                    .arc = svgToRenderArc(cursor, params),
+                });
+
+                cursor = params.end;
             },
             .rel_move => |m| {
                 cursor += m;
@@ -180,26 +279,16 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
                 });
             },
             .rel_cubic_bezier_seq => |b| {
-                const end_v = cursor + b[1];
-                const c2_v = cursor + b[0];
-
-                const end_c2 = c2_v - end_v;
-
-                // FIXME: Why is this here?
-                const cursor_v = cursor;
-
-
-                const start_end_dir = sphtud.math.normalize(end_v - cursor_v);
-                const reflect_offs = start_end_dir * @as(sphtud.math.Vec2, @splat(2 * sphtud.math.dot(end_c2, start_end_dir)));
-                const start_c2 = end_c2 + reflect_offs;
-                const c1 = cursor_v + start_c2;
+                const end = cursor + b[1];
+                const c2 = cursor + b[0];
+                const c1 = reflectCubicBezier(cursor, c2, end);
 
                 try render_path.append(.{
                     .cubic_bezier = .{
                         .start = cursor,
                         .c1 = c1,
-                        .c2 = cursor + b[0],
-                        .end = cursor + b[1],
+                        .c2 = c2,
+                        .end = end,
                     },
                 });
                 cursor += b[1];
@@ -214,74 +303,10 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
                     .end = cursor + rel_params.end,
                 };
 
-                // https://www.w3.org/TR/SVG2/implnote.html#ArcImplementationNotes
-                // Section B.2.3
-                const half_x = (cursor[0] - params.end[0]) / 2.0;
-                const half_y = (cursor[1] - params.end[1]) / 2.0;
-
-                const x_rot_rad = params.x_rot * std.math.pi / 180.0;
-                const cos_phi = @cos(x_rot_rad);
-                const sin_phi = @sin(x_rot_rad);
-
-                // step 1
-                const x_prime = half_x * cos_phi + half_y * sin_phi;
-                const y_prime = half_x * -sin_phi + half_y * cos_phi;
-
-                const x_prime_2 = x_prime * x_prime;
-                const y_prime_2 = y_prime * y_prime;
-
-                //step 2
-                const rx2 = params.rx * params.rx;
-                const ry2 = params.ry * params.ry;
-
-                var step_2_scale = @sqrt(
-                    (rx2 * ry2 - rx2 * y_prime_2 - ry2 * x_prime_2) /
-                    (rx2 * y_prime_2  + ry2 * x_prime_2)
-                );
-
-                if (params.large_arc == params.sweep_flag) {
-                    step_2_scale *= -1;
-                }
-
-                const cx_prime = step_2_scale * params.rx * y_prime / params.ry;
-                const cy_prime = step_2_scale * -params.ry * x_prime / params.rx;
-
-                // Step 3
-                const avg_x = (cursor[0] + params.end[0]) / 2;
-                const avg_y = (cursor[1] + params.end[1]) / 2;
-
-                const cx = cx_prime * cos_phi + cy_prime * -sin_phi + avg_x;
-                const cy = cy_prime * sin_phi + cy_prime * cos_phi + avg_y;
-
-
-                // step 4
-                const v1 = sphtud.math.Vec2{
-                    (x_prime - cx_prime) / params.rx,
-                    (y_prime - cy_prime) / params.ry,
-                };
-                const v2 = sphtud.math.Vec2{
-                    (-x_prime - cx_prime) / params.rx,
-                    (-y_prime - cy_prime) / params.ry,
-                };
-
-                const theta = angleBetween(.{1, 0}, v1);
-                var delta_theta = angleBetween(v1, v2);
-                if (!params.sweep_flag and delta_theta > 0) {
-                    delta_theta -= std.math.pi * 2;
-                } else if (params.sweep_flag and delta_theta < 0) {
-                    delta_theta += std.math.pi * 2;
-                }
-
                 try render_path.append(.{
-                    .arc = .{
-                        .delta_theta = delta_theta,
-                        .start_theta = theta,
-                        .center = .{ cx, cy },
-                        .rx = params.rx,
-                        .ry = params.ry,
-                        .rot = params.x_rot,
-                    },
+                    .arc = svgToRenderArc(cursor, params),
                 });
+
                 cursor = params.end;
             },
             .close => {
@@ -298,6 +323,7 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
     try renderer.renderPath(scratch.allocator(), render_path, color);
 }
 
+
 pub const solid_color_frag =
     \\#version 330
     \\out vec4 fragment;
@@ -310,6 +336,7 @@ pub const solid_color_frag =
 
 
 pub fn main(init: std.process.Init) !void {
+    _ = init;
     var allocators: sphtud.render.AppAllocators = undefined;
     try allocators.initPinned(1 * 1024 * 1024);
 
@@ -321,27 +348,19 @@ pub fn main(init: std.process.Init) !void {
     gl.glClearColor(0, 0, 0, 1);
     gl.glClear(gl.GL_COLOR_BUFFER_BIT);
 
-    const svg_data = try loadSvg(init.arena.allocator());
-    var svg_reader = std.Io.Reader.fixed(svg_data);
+    const svg_f = try sphtud.io.open("blender.svg", .{}, 0);
+    defer sphtud.io.close(svg_f);
 
-    //var parser = sphtud.xml.Parser.init(&svg_reader);
-    var parser = try SvgReader.init(&svg_reader);
+    // Needs to be large enough to hold the largest attribute
+    var reader_buf: [32 * 1024]u8 = undefined;
+    var svg_reader = sphtud.io.Reader.init(svg_f, &reader_buf);
 
-
-    var renderer = Renderer{
-        .prog = try .init(&allocators.root_gl, solid_color_frag),
-        .scratch_gl = &allocators.scratch_gl,
-        // FIXME: Parse from the svg
-        .tl = .{parser.view_box.min_x, parser.view_box.min_y },
-        .br = .{ parser.view_box.min_x + parser.view_box.width, parser.view_box.min_y + parser.view_box.height },
-    };
-    //try renderer.renderPath(.empty, .{ 1, 0, 0 });
-
-    while (try parser.next()) |elem| switch (elem) {
-        .path => |path| {
-            try handlePath(allocators.scratch.linear(), path, &renderer);
-        },
-    };
+    try renderSvg(
+        allocators.scratch.linear(),
+        &allocators.root_gl,
+        &allocators.scratch_gl,
+        &svg_reader.interface,
+    );
 
     //{
     //    var path = try Renderer.Path.init(allocators.scratch.allocator(), .linear(allocators.scratch.allocator()), 16, 1024);
