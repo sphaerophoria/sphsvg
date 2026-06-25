@@ -1,5 +1,6 @@
 const sphtud = @import("sphtud");
 const std = @import("std");
+const parse = @import("parse.zig");
 
 buf: sphtud.lex.Buf,
 state: ?ItemType = null,
@@ -108,22 +109,8 @@ pub fn next(self: *PathParser) !?Item {
     }
 }
 
-fn digits(buf: *sphtud.lex.Buf) ?sphtud.lex.Range {
-    comptime std.debug.assert('9' - '0' == 9);
-    return buf.takeWhileBetween('0', '9');
-}
-
-fn wsp(buf: *sphtud.lex.Buf) void {
-    const ws_chars: []const u8 = &.{ 0x9, 0x20, 0xA, 0xC, 0xD };
-    _ = buf.takeWhileAny(ws_chars);
-}
-
-fn sign(buf: *sphtud.lex.Buf) ?sphtud.lex.Idx {
-    return buf.takeOne("+-");
-}
-
 fn flag(buf: *sphtud.lex.Buf) !bool {
-    wsp(buf);
+    parse.wsp(buf);
     const idx = buf.takeOne("01") orelse return error.Invalid;
     switch (idx.data(buf.*)) {
         '0' => return false,
@@ -133,46 +120,8 @@ fn flag(buf: *sphtud.lex.Buf) !bool {
 }
 
 fn coordElem(buf: *sphtud.lex.Buf) !f32 {
-    wsp(buf);
-    var tmp = buf.tmp();
-
-    _ = sign(&tmp);
-    _ = digits(&tmp);
-    const has_decimal = tmp.takeOne(".") != null;
-    if (has_decimal) {
-        _ = digits(&tmp);
-    }
-    const has_exponent = tmp.takeOne("eE") != null;
-    if (has_exponent) {
-        _ = sign(&tmp);
-        _ = digits(&tmp);
-    }
-
-    const r = buf.commit(tmp) orelse return error.Invalid;
-
+    const r = parse.number(buf) orelse return error.Invalid;
     return try std.fmt.parseFloat(f32, r.data(buf.*));
-}
-
-test coordElem {
-    const tests: []const struct { []const u8, f32 } = &.{
-        .{ ".1234", 0.1234 },
-        .{ ".1234.123490812309581", 0.1234 },
-        .{ "0.1234.123490812309581", 0.1234 },
-        .{ "1..123490812309581", 1 },
-        .{ "1..", 1 },
-        .{ "1.2.", 1.2 },
-        .{ "+1.2.", 1.2 },
-        .{ "-1.2.", -1.2 },
-        .{ "-1.2e10", -1.2e10 },
-        .{ "-1.2e-10", -1.2e-10 },
-    };
-
-    for (tests) |t| {
-        var buf = sphtud.lex.Buf.init(t[0]);
-
-        const val = try coordElem(&buf);
-        try std.testing.expectApproxEqAbs(t[1], val, 0.0001);
-    }
 }
 
 fn coord(buf: *sphtud.lex.Buf) !Coord {

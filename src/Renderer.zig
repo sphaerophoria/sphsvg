@@ -18,76 +18,60 @@ const Uniforms = struct {
 };
 
 pub const Path = sphtud.util.RuntimeSegmentedList(Action);
-// FIXME: Conversion + real type for renderer
 pub const Point = sphtud.math.Vec2;
 
-const CubicBezier = struct {
+pub const CubicBezier = struct {
+    start: Point,
     c1: Point,
     c2: Point,
     end: Point,
 };
 
-const QuadBezier = struct {
+pub const QuadBezier = struct {
+    start: Point,
     c: Point,
     end: Point,
 };
 
-
-const Arc = struct {
-    // Start has to be on the elpise
+pub const Arc = struct {
     rot: f32,
     rx: f32,
     ry: f32,
     center: Point,
-    start_theta: f32, // Note semi-duplicated with cursor :)
+    start_theta: f32,
     delta_theta: f32,
 };
+
+pub const Line = struct {
+    start: Point,
+    end: Point,
+};
+
 pub const Action = union(enum) {
-    move: Point,
-    line_to: Point,
+    line: Line,
     cubic_bezier: CubicBezier,
     quad_bezier: QuadBezier,
     arc: Arc,
-    close,
 };
 
 pub fn renderPath(self: *Renderer, scratch: std.mem.Allocator, path: Path, color: sphtud.math.Vec3) !void {
-    //var cursor = Point { .x = 0, .y = 0 };
-    // path points are defined in svg space
-    // gl points [-1, 1]
-
     if (path.len == 0) return;
 
-    var cursor: Point = .{0, 0};
-    var cursor_start: Point = cursor;
-    if (path.get(0) == .move) {
-        cursor_start = path.get(0).move;
-    }
-
     var buf_data: std.ArrayList(xyt.Vertex) = .empty;
-    try buf_data.append(scratch, .{ .vPos = cursor_start, });
 
     var it = path.iter();
     while (it.next()) |inst| switch (inst.*) {
-        .move => |m| {
-            if (buf_data.items.len > 0) {
-                try self.renderVertexList(buf_data.items, color);
-                buf_data.clearRetainingCapacity();
-                try buf_data.append(scratch, .{ .vPos = .{ m[0], m[1] }, });
-            }
-            cursor = m;
-
-        },
-        .line_to => |m| {
-            cursor = m;
-            try buf_data.append(scratch, .{ .vPos = .{ cursor[0], cursor[1] }, });
+        .line => |m| {
+            try buf_data.append(scratch, .{ .vPos = m.start, });
+            try buf_data.append(scratch, .{ .vPos = m.end, });
         },
         .cubic_bezier => |bezier| {
-            const start: sphtud.math.Vec2 = .{ cursor[0], cursor[1] };
-            const c1: sphtud.math.Vec2 = .{ bezier.c1[0], bezier.c1[1] };
-            const c2: sphtud.math.Vec2 = .{ bezier.c2[0], bezier.c2[1] };
-            const end: sphtud.math.Vec2 = .{ bezier.end[0], bezier.end[1] };
+            const start = bezier.start;
+            const c1 = bezier.c1;
+            const c2 = bezier.c2;
+            const end = bezier.end;
 
+            var last = bezier.start;
             for (0..bezier_resolution) |i| {
                 const t: sphtud.math.Vec2 = @splat(1.0 / @as(f32,bezier_resolution) * @as(f32, @floatFromInt(i + 1)));
 
@@ -99,34 +83,35 @@ pub fn renderPath(self: *Renderer, scratch: std.mem.Allocator, path: Path, color
                 const e = std.math.lerp(b, c, t);
 
                 const p = std.math.lerp(d, e, t);
+                try buf_data.append(scratch, .{ .vPos = last });
                 try buf_data.append(scratch, .{ .vPos = p });
+                last = p;
             }
-
-            cursor = bezier.end;
         },
         .quad_bezier => {
             unreachable;
         },
         .arc => |arc| {
+            const rotation_mat = sphtud.math.Transform.rotate(arc.rot);
+
+            var last = blk: {
+                var val = rotation_mat.apply(.{arc.rx * @cos(arc.start_theta), arc.ry * @sin(arc.start_theta), 1});
+                val += .{ arc.center[0], arc.center[1], 0 };
+                break :blk val;
+            };
+
             for (0..bezier_resolution) |i| {
                 const t: f32 = 1.0 / @as(f32, bezier_resolution) * @as(f32, @floatFromInt(i + 1));
                 const theta = arc.start_theta + arc.delta_theta * t;
 
-                const rotation_mat = sphtud.math.Transform.rotate(arc.rot);
                 // FIXME: Maybe mat2x2 apply would be nice here
                 var val = rotation_mat.apply(.{arc.rx * @cos(theta), arc.ry * @sin(theta), 1});
                 val += .{ arc.center[0], arc.center[1], 0 };
 
+                try buf_data.append(scratch, .{ .vPos = .{last[0], last[1]} });
                 try buf_data.append(scratch, .{ .vPos = .{val[0], val[1]} });
+                last = val;
             }
-            const last = buf_data.items[buf_data.items.len-1];
-            cursor[0] = last.vPos[0];
-            cursor[1] = last.vPos[1];
-
-        },
-        .close => {
-            cursor = cursor_start;
-            try buf_data.append(scratch, .{ .vPos = .{ cursor[0], cursor[1] }, });
         },
     };
 
@@ -152,7 +137,7 @@ fn renderVertexList(self: *Renderer, buf_data: []const xyt.Vertex, color: sphtud
         .then(.scale(2.0 / width, -2.0 / height))
     ;
 
-    self.prog.renderLineStrip(s, .{
+    self.prog.renderLines(s, .{
         .color = color,
         .transform = transform.inner,
     });
