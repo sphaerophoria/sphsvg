@@ -5,17 +5,6 @@ const PathParser = @import("PathParser.zig");
 const Renderer = @import("Renderer.zig");
 const SvgReader = @import("SvgReader.zig");
 
-fn loadSvg(alloc: std.mem.Allocator) ![]const u8 {
-    const f = try sphtud.io.open("blender.svg", .{}, 0);
-    defer sphtud.io.close(f);
-
-    var reader_buf: [4096]u8 = undefined;
-    var fr = sphtud.io.Reader.init(f, &reader_buf);
-    const r = &fr.interface;
-
-    return try r.allocRemaining(alloc, .unlimited);
-}
-
 const xyt = sphtud.render.xyt_program;
 
 fn angleBetween(a: sphtud.math.Vec2, b: sphtud.math.Vec2) f32 {
