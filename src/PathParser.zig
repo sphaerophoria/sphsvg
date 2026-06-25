@@ -5,8 +5,7 @@ buf: sphtud.lex.Buf,
 state: ?ItemType = null,
 
 pub const Coord = struct {
-    x: f32,
-    y: f32,
+    val: sphtud.math.Vec2,
 
     pub fn format(self: Coord, w: *std.Io.Writer) !void {
         try w.print("({d},{d})", .{ self.x, self.y });
@@ -186,10 +185,7 @@ fn coord(buf: *sphtud.lex.Buf) !Coord {
     const x = try coordElem(buf);
     const y = try coordElem(buf);
 
-    return .{
-        .x = x,
-        .y = y,
-    };
+    return .{ .val = .{ x, y }};
 }
 
 const command_chars = "MmCcQqZzHhVvLlSsAa";

@@ -2,6 +2,7 @@ const sphtud = @import("sphtud");
 const gl = sphtud.render.gl;
 const std = @import("std");
 const PathParser = @import("PathParser.zig");
+const Renderer = @import("Renderer.zig");
 
 fn loadSvg(alloc: std.mem.Allocator) ![]const u8 {
     const f = try sphtud.io.open("blender.svg", .{}, 0);
@@ -22,160 +23,6 @@ fn ensureIsSvg(first_item: ?sphtud.xml.Item) !void {
 
 const xyt = sphtud.render.xyt_program;
 
-const Renderer = struct {
-    tl: Point,
-    br: Point,
-    prog: xyt.Program(Uniforms),
-    scratch_gl: *sphtud.render.GlAlloc,
-
-
-    const Uniforms = struct {
-        color: sphtud.math.Vec3,
-        transform: sphtud.math.Mat3x3,
-    };
-
-    const Path = sphtud.util.RuntimeSegmentedList(Action);
-    // FIXME: Conversion + real type for renderer
-    const Point = PathParser.Coord;
-
-    const CubicBezier = struct {
-        c1: Point,
-        c2: Point,
-        end: Point,
-    };
-
-    const QuadBezier = struct {
-        c: Point,
-        end: Point,
-    };
-
-
-    const Arc = struct {
-        // Start has to be on the elpise
-        rot: f32,
-        rx: f32,
-        ry: f32,
-        center: Point,
-        start_theta: f32, // Note semi-duplicated with cursor :)
-        delta_theta: f32,
-    };
-    pub const Action = union(enum) {
-        move: Point,
-        line_to: Point,
-        cubic_bezier: CubicBezier,
-        quad_bezier: QuadBezier,
-        arc: Arc,
-        close,
-    };
-
-    pub fn renderPath(self: *Renderer, scratch: std.mem.Allocator, path: Path, color: sphtud.math.Vec3) !void {
-        //var cursor = Point { .x = 0, .y = 0 };
-        // path points are defined in svg space
-        // gl points [-1, 1]
-
-        if (path.len == 0) return;
-
-        var cursor: Point = .{ .x = 0, .y = 0 };
-        var cursor_start: Point = cursor;
-        if (path.get(0) == .move) {
-            cursor_start = path.get(0).move;
-        }
-
-        var buf_data: std.ArrayList(xyt.Vertex) = .empty;
-        try buf_data.append(scratch, .{ .vPos = .{ cursor_start.x, cursor_start.y }, });
-
-        var it = path.iter();
-        while (it.next()) |inst| switch (inst.*) {
-            .move => |m| {
-                if (buf_data.items.len > 0) {
-                    try self.renderVertexList(buf_data.items, color);
-                    buf_data.clearRetainingCapacity();
-                    try buf_data.append(scratch, .{ .vPos = .{ m.x, m.y }, });
-                }
-                cursor = m;
-
-            },
-            .line_to => |m| {
-                cursor = m;
-                try buf_data.append(scratch, .{ .vPos = .{ cursor.x, cursor.y }, });
-            },
-            .cubic_bezier => |bezier| {
-                const start: sphtud.math.Vec2 = .{ cursor.x, cursor.y };
-                const c1: sphtud.math.Vec2 = .{ bezier.c1.x, bezier.c1.y };
-                const c2: sphtud.math.Vec2 = .{ bezier.c2.x, bezier.c2.y };
-                const end: sphtud.math.Vec2 = .{ bezier.end.x, bezier.end.y };
-
-                for (0..10) |i| {
-                    const t: sphtud.math.Vec2 = @splat(0.1 * @as(f32, @floatFromInt(i + 1)));
-
-                    const a = std.math.lerp(start, c1, t);
-                    const b = std.math.lerp(c1, c2, t);
-                    const c = std.math.lerp(c2, end, t);
-
-                    const d = std.math.lerp(a, b, t);
-                    const e = std.math.lerp(b, c, t);
-
-                    const p = std.math.lerp(d, e, t);
-                    try buf_data.append(scratch, .{ .vPos = p });
-                }
-
-                cursor = bezier.end;
-            },
-            .quad_bezier => {
-                unreachable;
-        },
-            .arc => |arc| {
-                for (0..10) |i| {
-                    const t: f32 = 0.1 * @as(f32, @floatFromInt(i + 1));
-                    const theta = arc.start_theta + arc.delta_theta * t;
-
-                    const rotation_mat = sphtud.math.Transform.rotate(arc.rot);
-                    // FIXME: Maybe mat2x2 apply would be nice here
-                    var val = rotation_mat.apply(.{arc.rx * @cos(theta), arc.ry * @sin(theta), 1});
-                    val += .{ arc.center.x, arc.center.y, 0 };
-
-                    try buf_data.append(scratch, .{ .vPos = .{val[0], val[1]} });
-                }
-                const last = buf_data.items[buf_data.items.len-1];
-                cursor.x = last.vPos[0];
-                cursor.y = last.vPos[1];
-
-            },
-            .close => {
-                cursor = cursor_start;
-                try buf_data.append(scratch, .{ .vPos = .{ cursor.x, cursor.y }, });
-            },
-        };
-
-        try self.renderVertexList(buf_data.items, color);
-    }
-
-    fn renderVertexList(self: *Renderer, buf_data: []const xyt.Vertex, color: sphtud.math.Vec3) !void {
-        const buf = try xyt.Buffer.init(self.scratch_gl, buf_data);
-
-        var s = try xyt.RenderSource.init(self.scratch_gl);
-        s.bindData(self.prog.handle(), buf);
-
-        // Center of image at 0,0
-        // Scale such that width/height are both 2
-        // Tl -> br
-        // width = br.x - tl.x
-        // width = br.x - tl.x
-        const cx = (self.tl.x + self.br.x) / 2.0;
-        const cy = (self.tl.y + self.br.y) / 2.0;
-        const width = self.br.x - self.tl.x;
-        const height = self.br.y - self.tl.y;
-        const transform = sphtud.math.Transform.translate(-cx, -cy)
-            .then(.scale(2.0 / width, -2.0 / height))
-        ;
-
-        self.prog.renderLineStrip(s, .{
-            .color = color,
-            .transform = transform.inner,
-        });
-    }
-};
-
 fn angleBetween(a: sphtud.math.Vec2, b: sphtud.math.Vec2) f32 {
     const ret =  std.math.acos(sphtud.math.dot(sphtud.math.normalize(a), sphtud.math.normalize(b)));
     return ret * std.math.copysign(@as(f32, 1.0), sphtud.math.cross2(a, b));
@@ -189,7 +36,7 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
 
     // FIXME: Find a reasonable upper bound
     var render_path = try Renderer.Path.init(scratch.allocator(), .linear(scratch.allocator()), 16, 32 * 1024);
-    var cursor = Renderer.Point{ .x = 0,  .y = 0};
+    var cursor = Renderer.Point{0, 0};
     // FIXME: Default color maybe comes from renderer?
     var color = sphtud.math.Vec3{1, 1, 1};
 
@@ -214,96 +61,83 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
             while (try pp.next()) |item| {
                 switch(item) {
                     .abs_move => |m| {
+                        cursor = m.val;
                         try render_path.append(.{
-                            .move = .{
-                                .x = m.x,
-                                .y = m.y,
-                            },
+                            .move = cursor,
                         });
-                        cursor = .{ .x = m.x, .y = m.y };
                     },
                     .abs_line => |m| {
+                        cursor = m.val;
                         try render_path.append(.{
-                            .line_to = .{
-                                .x = m.x,
-                                .y = m.y,
-                            },
+                            .line_to = cursor,
                         });
-                        cursor = .{ .x = m.x, .y = m.y };
                     },
                     .abs_horizontal_line => |x| {
+                        cursor[0] = x;
                         try render_path.append(.{
-                            .line_to = .{
-                                .x = x,
-                                .y = cursor.y,
-                            },
+                            .line_to = cursor,
                         });
-                        cursor.x = x;
                     },
                     .abs_vertical_line => |y| {
+                        cursor[1] = y;
                         try render_path.append(.{
-                            .line_to = .{
-                                .x = cursor.x,
-                                .y = y,
-                            },
+                            .line_to = cursor,
                         });
-                        cursor.y = y;
                     },
                     .abs_cubic_bezier => |b| {
+                        cursor = b[2].val;
                         try render_path.append(.{
                             .cubic_bezier = .{
-                                .c1 = b[0],
-                                .c2 = b[1],
-                                .end = b[2],
+                                .c1 = b[0].val,
+                                .c2 = b[1].val,
+                                .end = b[2].val,
                             },
                         });
-                        cursor = .{ .x = b[2].x, .y = b[2].y };
                     },
                     .abs_quad_bezier => |b| {
+                        cursor = b[1].val;
                         try render_path.append(.{
                             .quad_bezier = .{
-                                .c = b[0],
-                                .end = b[1],
+                                .c = b[0].val,
+                                .end = b[1].val,
                             },
                         });
-                        cursor = .{ .x = b[1].x, .y = b[1].y };
                     },
                     .abs_cubic_bezier_seq => |b| {
                         std.log.warn("skipping abs sequential bezier (need to reflect c1)\n", .{});
-                        cursor = b[1];
+                        cursor = b[1].val;
                     },
                     .abs_arc => {
                         std.log.warn("skipping abs arc\n", .{});
                     },
                     .rel_move => |m| {
-                        cursor = .{ .x = cursor.x + m.x, .y = cursor.y + m.y };
+                        cursor += m.val;
                         try render_path.append(.{
                             .move = cursor,
                         });
                     },
                     .rel_line => |m| {
-                        cursor = .{ .x = cursor.x + m.x, .y = cursor.y + m.y };
+                        cursor += m.val;
                         try render_path.append(.{
                             .line_to = cursor,
                         });
                     },
                     .rel_horizontal_line => |x| {
-                        cursor.x += x;
+                        cursor[0] += x;
                         try render_path.append(.{
                             .line_to = cursor,
                         });
                     },
                     .rel_vertical_line => |y| {
-                        cursor.y += y;
+                        cursor[1] += y;
                         try render_path.append(.{
                             .line_to = cursor,
                         });
                     },
                     .rel_cubic_bezier => |b| {
-                        const c1 = Renderer.Point{ .x = cursor.x + b[0].x, .y = cursor.y + b[0].y };
-                        const c2 = Renderer.Point{ .x = cursor.x + b[1].x, .y = cursor.y + b[1].y };
-                        cursor.x += b[2].x;
-                        cursor.y += b[2].y;
+                        const c1 = cursor + b[0].val;
+                        const c2 = cursor + b[1].val;
+                        cursor += b[2].val;
 
                         try render_path.append(.{
                             .cubic_bezier = .{
@@ -314,24 +148,24 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
                         });
                     },
                     .rel_quad_bezier => |b| {
-                        const c1 = Renderer.Point{ .x = cursor.x + b[0].x, .y = cursor.y + b[0].y };
-                        cursor.x += b[1].x;
-                        cursor.y += b[1].y;
+                        const c = cursor + b[0].val;
+                        cursor += b[1].val;
 
                         try render_path.append(.{
                             .quad_bezier = .{
-                                .c = c1,
+                                .c = c,
                                 .end = cursor,
                             },
                         });
                     },
                     .rel_cubic_bezier_seq => |b| {
-                        const end_v = sphtud.math.Vec2 { cursor.x + b[1].x, cursor.y + b[1].y };
-                        const c2_v = sphtud.math.Vec2 { cursor.x + b[0].x, cursor.y + b[0].y };
+                        const end_v = cursor + b[1].val;
+                        const c2_v = cursor + b[0].val;
 
                         const end_c2 = c2_v - end_v;
 
-                        const cursor_v = sphtud.math.Vec2 { cursor.x, cursor.y };
+                        // FIXME: Why is this here?
+                        const cursor_v = cursor;
 
 
                         const start_end_dir = sphtud.math.normalize(end_v - cursor_v);
@@ -341,13 +175,12 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
 
                         try render_path.append(.{
                             .cubic_bezier = .{
-                                .c1 = .{ .x = c1[0], .y = c1[1] },
-                                .c2 = .{ .x = cursor.x + b[0].x, .y = cursor.y + b[0].y },
-                                .end = .{ .x = cursor.x + b[1].x, .y = cursor.y + b[1].y },
+                                .c1 = c1,
+                                .c2 = cursor + b[0].val,
+                                .end = cursor + b[1].val,
                             },
                         });
-                        cursor.x += b[1].x;
-                        cursor.y += b[1].y;
+                        cursor += b[1].val;
                     },
                     .rel_arc => |rel_params| {
                         const params = PathParser.Arc {
@@ -357,14 +190,13 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
                             .large_arc = rel_params.large_arc,
                             .x_rot = rel_params.x_rot,
                             .end = .{
-                                .x = cursor.x + rel_params.end.x,
-                                .y = cursor.y + rel_params.end.y,
+                                .val = cursor + rel_params.end.val,
                             },
                         };
 
                         std.debug.print("converted rel params {any}\n", .{params});
-                        const half_x = (cursor.x - params.end.x) / 2.0;
-                        const half_y = (cursor.y - params.end.y) / 2.0;
+                        const half_x = (cursor[0] - params.end.val[0]) / 2.0;
+                        const half_y = (cursor[1] - params.end.val[1]) / 2.0;
 
                         const x_rot_rad = params.x_rot * std.math.pi / 180.0;
                         const cos_phi = @cos(x_rot_rad);
@@ -394,8 +226,8 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
                         const cy_prime = step_2_scale * -params.ry * x_prime / params.rx;
 
                         // Step 3
-                        const avg_x = (cursor.x + params.end.x) / 2;
-                        const avg_y = (cursor.y + params.end.y) / 2;
+                        const avg_x = (cursor[0] + params.end.val[0]) / 2;
+                        const avg_y = (cursor[1] + params.end.val[1]) / 2;
 
                         const cx = cx_prime * cos_phi + cy_prime * -sin_phi + avg_x;
                         const cy = cy_prime * sin_phi + cy_prime * cos_phi + avg_y;
@@ -423,16 +255,13 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
                             .arc = .{
                                 .delta_theta = delta_theta,
                                 .start_theta = theta,
-                                .center = .{
-                                    .x = cx,
-                                    .y = cy,
-                                },
+                                .center = .{ cx, cy },
                                 .rx = params.rx,
                                 .ry = params.ry,
                                 .rot = params.x_rot,
                             },
                         });
-                        cursor = params.end;
+                        cursor = params.end.val;
                     },
                     .close => {
                         try render_path.append(.close);
@@ -482,8 +311,9 @@ pub fn main(init: std.process.Init) !void {
     var renderer = Renderer{
         .prog = try .init(&allocators.root_gl, solid_color_frag),
         .scratch_gl = &allocators.scratch_gl,
-        .tl = .{ .x = 0, .y = 0 },
-        .br = .{ .x = 128, .y = 128 },
+        // FIXME: Parse from the svg
+        .tl = .{0, 0 },
+        .br = .{ 128, 128 },
     };
 
     //try renderer.renderPath(.empty, .{ 1, 0, 0 });
