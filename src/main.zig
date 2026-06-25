@@ -362,26 +362,8 @@ pub fn main(init: std.process.Init) !void {
         &svg_reader.interface,
     );
 
-    //{
-    //    var path = try Renderer.Path.init(allocators.scratch.allocator(), .linear(allocators.scratch.allocator()), 16, 1024);
-    //    try path.append(.{
-    //        .arc = .{
-    //            .center = .{ .x = 64, .y = 64 },
-    //            .rx = 50,
-    //            .ry = 32,
-    //            .start_theta = 0,
-    //            .delta_theta = 2 * std.math.pi,
-    //            .rot = std.math.pi / 4.0,
-    //        },
-    //    });
-
-    //    try renderer.renderPath(allocators.scratch.allocator(), path, .{ 1, 1, 1 });
-    //}
-
     window.swapBuffers();
 
-    //std.debug.print("{s}\n", .{svg_data});
-    //
     while (!window.closed()) {
         try sphtud.io.nanosleep(.fromMilliseconds(50));
         window.queue.head = 0;
