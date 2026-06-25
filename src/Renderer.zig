@@ -8,6 +8,8 @@ br: Point,
 prog: xyt.Program(Uniforms),
 scratch_gl: *sphtud.render.GlAlloc,
 
+const bezier_resolution = 10;
+
 const Renderer = @This();
 
 const Uniforms = struct {
@@ -86,8 +88,8 @@ pub fn renderPath(self: *Renderer, scratch: std.mem.Allocator, path: Path, color
             const c2: sphtud.math.Vec2 = .{ bezier.c2[0], bezier.c2[1] };
             const end: sphtud.math.Vec2 = .{ bezier.end[0], bezier.end[1] };
 
-            for (0..10) |i| {
-                const t: sphtud.math.Vec2 = @splat(0.1 * @as(f32, @floatFromInt(i + 1)));
+            for (0..bezier_resolution) |i| {
+                const t: sphtud.math.Vec2 = @splat(1.0 / @as(f32,bezier_resolution) * @as(f32, @floatFromInt(i + 1)));
 
                 const a = std.math.lerp(start, c1, t);
                 const b = std.math.lerp(c1, c2, t);
@@ -104,10 +106,10 @@ pub fn renderPath(self: *Renderer, scratch: std.mem.Allocator, path: Path, color
         },
         .quad_bezier => {
             unreachable;
-    },
+        },
         .arc => |arc| {
-            for (0..10) |i| {
-                const t: f32 = 0.1 * @as(f32, @floatFromInt(i + 1));
+            for (0..bezier_resolution) |i| {
+                const t: f32 = 1.0 / @as(f32, bezier_resolution) * @as(f32, @floatFromInt(i + 1));
                 const theta = arc.start_theta + arc.delta_theta * t;
 
                 const rotation_mat = sphtud.math.Transform.rotate(arc.rot);

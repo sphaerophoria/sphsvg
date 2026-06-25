@@ -55,19 +55,18 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
         }
 
         if (std.mem.eql(u8, attr.key, "d")) {
-            std.debug.print("\n\nnew path\n", .{});
             var pp = PathParser.init(attr.val);
 
             while (try pp.next()) |item| {
                 switch(item) {
                     .abs_move => |m| {
-                        cursor = m.val;
+                        cursor = m;
                         try render_path.append(.{
                             .move = cursor,
                         });
                     },
                     .abs_line => |m| {
-                        cursor = m.val;
+                        cursor = m;
                         try render_path.append(.{
                             .line_to = cursor,
                         });
@@ -85,39 +84,39 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
                         });
                     },
                     .abs_cubic_bezier => |b| {
-                        cursor = b[2].val;
+                        cursor = b[2];
                         try render_path.append(.{
                             .cubic_bezier = .{
-                                .c1 = b[0].val,
-                                .c2 = b[1].val,
-                                .end = b[2].val,
+                                .c1 = b[0],
+                                .c2 = b[1],
+                                .end = b[2],
                             },
                         });
                     },
                     .abs_quad_bezier => |b| {
-                        cursor = b[1].val;
+                        cursor = b[1];
                         try render_path.append(.{
                             .quad_bezier = .{
-                                .c = b[0].val,
-                                .end = b[1].val,
+                                .c = b[0],
+                                .end = b[1],
                             },
                         });
                     },
                     .abs_cubic_bezier_seq => |b| {
                         std.log.warn("skipping abs sequential bezier (need to reflect c1)\n", .{});
-                        cursor = b[1].val;
+                        cursor = b[1];
                     },
                     .abs_arc => {
                         std.log.warn("skipping abs arc\n", .{});
                     },
                     .rel_move => |m| {
-                        cursor += m.val;
+                        cursor += m;
                         try render_path.append(.{
                             .move = cursor,
                         });
                     },
                     .rel_line => |m| {
-                        cursor += m.val;
+                        cursor += m;
                         try render_path.append(.{
                             .line_to = cursor,
                         });
@@ -135,9 +134,9 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
                         });
                     },
                     .rel_cubic_bezier => |b| {
-                        const c1 = cursor + b[0].val;
-                        const c2 = cursor + b[1].val;
-                        cursor += b[2].val;
+                        const c1 = cursor + b[0];
+                        const c2 = cursor + b[1];
+                        cursor += b[2];
 
                         try render_path.append(.{
                             .cubic_bezier = .{
@@ -148,8 +147,8 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
                         });
                     },
                     .rel_quad_bezier => |b| {
-                        const c = cursor + b[0].val;
-                        cursor += b[1].val;
+                        const c = cursor + b[0];
+                        cursor += b[1];
 
                         try render_path.append(.{
                             .quad_bezier = .{
@@ -159,8 +158,8 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
                         });
                     },
                     .rel_cubic_bezier_seq => |b| {
-                        const end_v = cursor + b[1].val;
-                        const c2_v = cursor + b[0].val;
+                        const end_v = cursor + b[1];
+                        const c2_v = cursor + b[0];
 
                         const end_c2 = c2_v - end_v;
 
@@ -176,11 +175,11 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
                         try render_path.append(.{
                             .cubic_bezier = .{
                                 .c1 = c1,
-                                .c2 = cursor + b[0].val,
-                                .end = cursor + b[1].val,
+                                .c2 = cursor + b[0],
+                                .end = cursor + b[1],
                             },
                         });
-                        cursor += b[1].val;
+                        cursor += b[1];
                     },
                     .rel_arc => |rel_params| {
                         const params = PathParser.Arc {
@@ -189,14 +188,13 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
                             .ry = rel_params.ry,
                             .large_arc = rel_params.large_arc,
                             .x_rot = rel_params.x_rot,
-                            .end = .{
-                                .val = cursor + rel_params.end.val,
-                            },
+                            .end = cursor + rel_params.end,
                         };
 
-                        std.debug.print("converted rel params {any}\n", .{params});
-                        const half_x = (cursor[0] - params.end.val[0]) / 2.0;
-                        const half_y = (cursor[1] - params.end.val[1]) / 2.0;
+                        // https://www.w3.org/TR/SVG2/implnote.html#ArcImplementationNotes
+                        // Section B.2.3
+                        const half_x = (cursor[0] - params.end[0]) / 2.0;
+                        const half_y = (cursor[1] - params.end[1]) / 2.0;
 
                         const x_rot_rad = params.x_rot * std.math.pi / 180.0;
                         const cos_phi = @cos(x_rot_rad);
@@ -226,8 +224,8 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
                         const cy_prime = step_2_scale * -params.ry * x_prime / params.rx;
 
                         // Step 3
-                        const avg_x = (cursor[0] + params.end.val[0]) / 2;
-                        const avg_y = (cursor[1] + params.end.val[1]) / 2;
+                        const avg_x = (cursor[0] + params.end[0]) / 2;
+                        const avg_y = (cursor[1] + params.end[1]) / 2;
 
                         const cx = cx_prime * cos_phi + cy_prime * -sin_phi + avg_x;
                         const cy = cy_prime * sin_phi + cy_prime * cos_phi + avg_y;
@@ -261,13 +259,12 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, xml_item: sphtud.xml.Item, 
                                 .rot = params.x_rot,
                             },
                         });
-                        cursor = params.end.val;
+                        cursor = params.end;
                     },
                     .close => {
                         try render_path.append(.close);
                     },
                 }
-                std.debug.print("{any}\n", .{item});
             }
         }
     }

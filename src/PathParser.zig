@@ -4,13 +4,7 @@ const std = @import("std");
 buf: sphtud.lex.Buf,
 state: ?ItemType = null,
 
-pub const Coord = struct {
-    val: sphtud.math.Vec2,
-
-    pub fn format(self: Coord, w: *std.Io.Writer) !void {
-        try w.print("({d},{d})", .{ self.x, self.y });
-    }
-};
+pub const Coord = sphtud.math.Vec2;
 
 pub const Arc = struct {
     rx: f32,
@@ -185,7 +179,7 @@ fn coord(buf: *sphtud.lex.Buf) !Coord {
     const x = try coordElem(buf);
     const y = try coordElem(buf);
 
-    return .{ .val = .{ x, y }};
+    return .{ x, y };
 }
 
 const command_chars = "MmCcQqZzHhVvLlSsAa";
