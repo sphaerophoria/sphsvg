@@ -27,4 +27,16 @@ pub fn build(b: *std.Build) !void {
 
     b.installArtifact(exe);
     b.installArtifact(sphsvg_tests);
+
+    const hit_test = b.addExecutable(.{
+        .name = "hit_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/hit_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    hit_test.root_module.addImport("sphtud", sphtud);
+
+    b.installArtifact(hit_test);
 }

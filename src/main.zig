@@ -12,7 +12,7 @@ fn angleBetween(a: sphtud.math.Vec2, b: sphtud.math.Vec2) f32 {
     return ret * std.math.copysign(@as(f32, 1.0), sphtud.math.cross2(a, b));
 }
 
-pub fn renderSvg(scratch: sphtud.alloc.LinearAllocator, gl_alloc: *sphtud.render.GlAlloc, scratch_gl: *sphtud.render.GlAlloc, r: *std.Io.Reader) !void {
+pub fn renderSvg(scratch: sphtud.alloc.LinearAllocator, gl_alloc: *sphtud.render.GlAlloc, scratch_gl: *sphtud.render.GlAlloc, r: *std.Io.Reader, out: sphtud.img.Image,) !void {
     var reader = try SvgReader.init(r);
     var renderer = Renderer{
         .prog = try .init(gl_alloc, solid_color_frag),
@@ -23,7 +23,7 @@ pub fn renderSvg(scratch: sphtud.alloc.LinearAllocator, gl_alloc: *sphtud.render
 
     while (try reader.next()) |elem| switch (elem) {
         .path => |path| {
-            try handlePath(scratch, path, &renderer);
+            try handlePath(scratch, path, &renderer, out);
         },
     };
 }
@@ -104,7 +104,7 @@ fn svgToRenderArc(cursor: sphtud.math.Vec2, params: PathParser.Arc) Renderer.Arc
     };
 }
 
-fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, renderer: *Renderer) !void {
+fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, renderer: *Renderer, out: sphtud.img.Image) !void {
     const cp = scratch.checkpoint();
     defer scratch.restore(cp);
 
@@ -310,6 +310,7 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
     }
 
     try renderer.renderPath(scratch.allocator(), render_path, color);
+    try renderer.renderPathToImage(scratch, render_path, color, out);
 }
 
 
@@ -344,13 +345,30 @@ pub fn main(init: std.process.Init) !void {
     var reader_buf: [32 * 1024]u8 = undefined;
     var svg_reader = sphtud.io.Reader.init(svg_f, &reader_buf);
 
+    var data_buf: [4 * 128 * 128]u8 = undefined;
+    @memset(&data_buf, 0);
+    const img = sphtud.img.Image {
+        .colorspace = .srgb,
+        .transfer_fn = .srgb,
+        .data = .init(.rgba_8888, &data_buf),
+        .width = 128,
+    };
+
     try renderSvg(
         allocators.scratch.linear(),
         &allocators.root_gl,
         &allocators.scratch_gl,
         &svg_reader.interface,
+        img,
     );
 
+
+    const out_ppm_f = try sphtud.io.open("out.ppm", .{.ACCMODE =.WRONLY, .CREAT = true, .TRUNC = true}, 0o664);
+    defer sphtud.io.close(out_ppm_f);
+
+    var out_ppm_w_buf: [4096]u8 = undefined;
+    var out_ppm_w = sphtud.io.Writer.init(out_ppm_f, &out_ppm_w_buf);
+    try sphtud.img.ppm.write(img, &out_ppm_w.interface);
     window.swapBuffers();
 
     while (!window.closed()) {
