@@ -12,78 +12,9 @@ const GlAlloc = sphtud.render.GlAlloc;
 
 const Vec2 = sphtud.math.Vec2;
 
-fn rayCircleIntersection(
-    start: Vec2, dir: Vec2,
-    center: Vec2, radius: f32,
-    ret_buf: *[2]Vec2,
-) []sphtud.math.Vec2 {
-    const to_midpoint = sphtud.math.dot(center - start, dir);
-    const midpoint = start + dir * Vec2{to_midpoint, to_midpoint};
-
-    const r_2 = radius * radius;
-    const perp = midpoint - center;
-    const perp_len_2 = sphtud.math.length2(perp);
-
-    if (perp_len_2 > r_2)  {
-        return &.{};
-    }
-
-    const offs = @sqrt(r_2 - perp_len_2);
-
-    const offs_v = Vec2{offs, offs};
-    const a = midpoint + dir * offs_v;
-    const b = midpoint - dir * offs_v;
-
-    var ret = std.ArrayList(Vec2).initBuffer(ret_buf);
-    if (sphtud.math.dot(a - start, dir) >= 0) {
-        ret.appendBounded(a) catch unreachable;
-    }
-
-    if (sphtud.math.dot(b - start, dir) >= 0) {
-        ret.appendBounded(b) catch unreachable;
-    }
-
-    return ret.items;
-}
-
 fn applyTransformVec2(v: Vec2, transform: sphtud.math.Transform) Vec2 {
     const ret = transform.apply(.{v[0], v[1], 1});
     return .{ ret[0] / ret[2], ret[1] / ret[2] };
-}
-
-fn rayEllipseIntersection(
-    start: Vec2, dir: Vec2,
-    center: Vec2, radius_x: f32, radius_y: f32, rot: f32,
-    ret_buf: *[2]Vec2,
-) []sphtud.math.Vec2 {
-    const radius = radius_y;
-    const to_circle =
-        sphtud.math.Transform.translate(-center[0], -center[1])
-        .then(sphtud.math.Transform.rotate(-rot))
-        .then(sphtud.math.Transform.scale(radius / radius_x, 1));
-
-    const old_end = start + dir;
-    const new_end = applyTransformVec2(old_end, to_circle);
-    const new_start = applyTransformVec2(start, to_circle);
-    const new_dir = sphtud.math.normalize(new_end - new_start);
-
-    const ret = rayCircleIntersection(
-        new_start,
-        new_dir,
-        applyTransformVec2(center, to_circle),
-        radius,
-        ret_buf,
-    );
-
-    const from_circle = sphtud.math.Transform.scale(radius_x / radius, 1)
-        .then(.rotate(rot))
-        .then(.translate(center[0], center[1]));
-
-    for (ret) |*r| {
-        r.* = applyTransformVec2(r.*, from_circle);
-    }
-
-    return ret;
 }
 
 pub const HitTestWidget = struct {
@@ -91,15 +22,9 @@ pub const HitTestWidget = struct {
 
     ray_buf: sphtud.render.xyt_program.Buffer,
     ray_source: sphtud.render.xyt_program.RenderSource,
-    ray_start: sphtud.math.Vec2,
-    ray_dir: sphtud.math.Vec2,
+    ray: sphtud.geometry.Ray2,
 
-    circle: struct {
-        center: sphtud.math.Vec2,
-        radius_x: f32,
-        radius_y: f32,
-        rot: f32,
-    },
+    circle: sphtud.geometry.Ellipse,
     circle_buf: sphtud.render.xyt_program.Buffer,
     circle_source: sphtud.render.xyt_program.RenderSource,
 
@@ -115,13 +40,15 @@ pub const HitTestWidget = struct {
             .render_program = try sphtud.render.xyt_program.solidColorProgram(alloc.gl),
             .ray_buf = try .init(alloc.gl, &.{}),
             .ray_source = try .init(alloc.gl),
-            .ray_start = .{ -0.5, 0 },
-            .ray_dir = .{ 1.0, 0.0 },
+            .ray = .{
+                .start = .{ -0.5, 0 },
+                .dir = .{ 1.0, 0.0 },
+            },
             .circle = .{
                 .center = .{ 0.0, 0.0 },
-                .radius_x = 0.5,
-                .radius_y = 0.5,
-                .rot = 0,
+                .rx = 0.5,
+                .ry = 0.5,
+                .rotation = 0,
             },
             .circle_buf = try .init(alloc.gl, &.{}),
             .circle_source = try .init(alloc.gl),
@@ -205,13 +132,13 @@ pub const HitTestWidget = struct {
 
 
         if (self.down_mask & 1 != 0) {
-            self.ray_start = mouseToClip(input_state.mouse_pos, widget_bounds);
+            self.ray.start = mouseToClip(input_state.mouse_pos, widget_bounds);
             self.updateRender();
         }
 
         if (self.down_mask & 2 != 0) {
             const ray_end = mouseToClip(input_state.mouse_pos, widget_bounds);
-            self.ray_dir = sphtud.math.normalize(ray_end - self.ray_start);
+            self.ray.dir = sphtud.math.normalize(ray_end - self.ray.start);
             self.updateRender();
         }
     }
@@ -228,10 +155,10 @@ pub const HitTestWidget = struct {
 
     fn updateRender(self: *HitTestWidget) void {
         var points: [2]sphtud.render.xyt_program.Vertex = undefined;
-        var ray_dir_large = self.ray_dir;
+        var ray_dir_large = self.ray.dir;
         ray_dir_large *= @splat(3);
-        points[0] = .{ .vPos = self.ray_start};
-        points[1] = .{ .vPos = self.ray_start + ray_dir_large};
+        points[0] = .{ .vPos = self.ray.start};
+        points[1] = .{ .vPos = self.ray.start + ray_dir_large};
 
         self.ray_buf.updateBuffer(&points);
 
@@ -241,9 +168,9 @@ pub const HitTestWidget = struct {
 
         for (&circle_points, 0..) |*cp, i| {
             const theta: f32 = asf32(i) / asf32(circle_points.len) * std.math.pi * 2;
-            const x = self.circle.radius_x * @cos(theta);
-            const y = self.circle.radius_y * @sin(theta);
-            const transform = sphtud.math.Transform.rotate(self.circle.rot).then(.translate(self.circle.center[0], self.circle.center[1]));
+            const x = self.circle.rx * @cos(theta);
+            const y = self.circle.ry * @sin(theta);
+            const transform = sphtud.math.Transform.rotate(self.circle.rotation).then(.translate(self.circle.center[0], self.circle.center[1]));
             cp.* = .{ .vPos = applyTransformVec2(.{x, y}, transform) };
         }
 
@@ -251,9 +178,8 @@ pub const HitTestWidget = struct {
         self.circle_source.bindData(self.render_program.handle(), self.circle_buf);
 
         var intersection_points_buf: [2]Vec2 = undefined;
-        const intersection_points = rayEllipseIntersection(
-            self.ray_start, self.ray_dir,
-            self.circle.center, self.circle.radius_x, self.circle.radius_y, self.circle.rot,
+        const intersection_points = sphtud.geometry.rayEllipseIntersection(
+            self.ray, self.circle,
             &intersection_points_buf,
         );
 
@@ -277,6 +203,91 @@ const ry_dragged = 3;
 const ry_drag_start = 4;
 const rot_dragged = 5;
 const rot_drag_start = 6;
+
+const Ids = struct {
+    rx: DragIds,
+    ry: DragIds,
+    rot: DragIds,
+
+    fn init() Ids {
+        var alloc = sphtud.util.IdAlloc.init;
+        return .{
+            .rx = .init(&alloc),
+            .ry = .init(&alloc),
+            .rot = .init(&alloc),
+        };
+    }
+};
+
+const ids = Ids.init();
+
+fn onDrag(ref: f32, drag: *gui.Drag) f32 {
+    return ref + drag.drag_delta_px * 0.001;
+}
+
+fn dragText(buf: []u8, val: f32) ![]const u8 {
+    return try std.fmt.bufPrint(buf, "{d:.3}", .{val});
+}
+
+const DragIds = struct {
+    on_start: usize,
+    on_dragged: usize,
+    total: sphtud.util.IdAlloc.Range,
+
+    pub fn init(alloc: *sphtud.util.IdAlloc) DragIds {
+        const mark = alloc.mark();
+        return .{
+            .on_start = alloc.allocOne(),
+            .on_dragged = alloc.allocOne(),
+            .total = mark.range(),
+        };
+    }
+};
+
+const DragF32 = struct {
+    // We are probably only dragging one widget at a time, so share the
+    // reference between all of them
+    var shared_ref: f32 = 0;
+
+    label: *gui.Label,
+    drag: *gui.Drag,
+    source: *f32,
+
+    fn init(wf: gui.WidgetFactory, source: *f32, comptime drag_ids: DragIds) !DragF32 {
+        var buf: [10]u8 = undefined;
+        const label = try wf.makeLabel(try dragText(&buf, source.*), .{});
+        const drag = try wf.makeDrag(&label.widget, drag_ids.on_start, drag_ids.on_dragged);
+        return .{
+            .label = label,
+            .drag = drag,
+            .source = source,
+        };
+    }
+
+    fn service(self: DragF32, event: usize, comptime drag_ids: DragIds) !bool {
+        switch (event) {
+            drag_ids.on_start => {
+                self.onDragStart();
+                return false;
+            },
+            drag_ids.on_dragged => {
+                try self.onDrag();
+                return true;
+            },
+            else => unreachable,
+        }
+    }
+
+    fn onDragStart(self: DragF32) void {
+        shared_ref = self.source.*;
+    }
+
+    fn onDrag(self: DragF32) !void {
+        var buf: [10]u8 = undefined;
+        self.source.* = shared_ref + self.drag.drag_delta_px * 0.001;
+        try self.label.setText(try dragText(&buf, self.source.*));
+    }
+};
 
 pub fn main() !void {
     var allocators: sphtud.render.AppAllocators = undefined;
@@ -307,28 +318,27 @@ pub fn main() !void {
         .state = gui_state,
     };
 
+    var hit_test_widget = try HitTestWidget.init(gui_alloc);
+
     const controls = try wf.makeLayout();
 
     const rx_label = try wf.makeLabel("rx", .{});
     try controls.append(&rx_label.widget);
 
-    const rx_value = try wf.makeLabel("", .{});
-    const rx_slider = try wf.makeDrag(&rx_value.widget, rx_drag_start, rx_dragged);
-    try controls.append(&rx_slider.widget);
+    const rx = try DragF32.init(wf, &hit_test_widget.circle.rx, ids.rx);
+    try controls.append(&rx.drag.widget);
 
     const ry_label = try wf.makeLabel("ry", .{});
     try controls.append(&ry_label.widget);
 
-    const ry_value = try wf.makeLabel("", .{});
-    const ry_slider = try wf.makeDrag(&ry_value.widget, ry_drag_start, ry_dragged);
-    try controls.append(&ry_slider.widget);
+    const ry = try DragF32.init(wf, &hit_test_widget.circle.ry, ids.ry);
+    try controls.append(&ry.drag.widget);
 
     const rot_label = try wf.makeLabel("rot", .{});
     try controls.append(&rot_label.widget);
 
-    const rot_value = try wf.makeLabel("", .{});
-    const rot_slider = try wf.makeDrag(&rot_value.widget, rot_drag_start, rot_dragged);
-    try controls.append(&rot_slider.widget);
+    const rot = try DragF32.init(wf, &hit_test_widget.circle.rotation, ids.rot);
+    try controls.append(&rot.drag.widget);
 
     const controls_background = try wf.makeRect(gui.WidgetState.StyleColors.background_color);
     const controls_stack_items = try gui_alloc.heap.arena().dupe(
@@ -340,7 +350,6 @@ pub fn main() !void {
     );
     const controls_stack = try wf.makeStack(controls_stack_items);
     const controls_box = try wf.makeBox(&controls_stack.widget, .{ .width = 300, .height = 0 }, .fill_height );
-    var hit_test_widget = try HitTestWidget.init(gui_alloc);
 
     const layout = try wf.makeLayout();
     layout.cursor.direction = .left_to_right;
@@ -350,19 +359,6 @@ pub fn main() !void {
     const runner = try wf.makeRunner(&layout.widget);
 
     const start = try sphtud.io.clock_gettime(.BOOTTIME);
-
-    var rx_ref: f32 = 0;
-    var ry_ref: f32 = 0;
-    var rot_ref: f32 = 0;
-
-    var rx_label_buf: [128]u8 = undefined;
-    try rx_value.setText(try std.fmt.bufPrint(&rx_label_buf, "{d:.3}", .{hit_test_widget.circle.radius_x}));
-
-    var ry_label_buf: [128]u8 = undefined;
-    try ry_value.setText(try std.fmt.bufPrint(&ry_label_buf, "{d:.3}", .{hit_test_widget.circle.radius_y}));
-
-    var rot_label_buf: [128]u8 = undefined;
-    try rot_value.setText(try std.fmt.bufPrint(&rot_label_buf, "{d:.3}", .{hit_test_widget.circle.rot}));
 
     while (!window.closed()) {
         allocators.resetScratch();
@@ -384,34 +380,25 @@ pub fn main() !void {
             .height = @intCast(height),
         }, &window.queue);
 
+        var needs_render = false;
         for (gui_state.event_queue.items) |event| switch (event) {
-            rx_drag_start => {
-                rx_ref = hit_test_widget.circle.radius_x;
+            ids.rx.total.start...ids.rx.total.end => {
+                needs_render |= try rx.service(event, ids.rx);
             },
-            rx_dragged => {
-                hit_test_widget.circle.radius_x = rx_ref + rx_slider.drag_delta_px * 0.001;
-                try rx_value.setText(try std.fmt.bufPrint(&rx_label_buf, "{d:.3}", .{hit_test_widget.circle.radius_x}));
-                hit_test_widget.updateRender();
+            ids.ry.total.start...ids.ry.total.end => {
+                needs_render |= try ry.service(event, ids.ry);
             },
-            ry_drag_start => {
-                ry_ref = hit_test_widget.circle.radius_y;
-            },
-            ry_dragged => {
-                hit_test_widget.circle.radius_y = ry_ref + ry_slider.drag_delta_px * 0.001;
-                try ry_value.setText(try std.fmt.bufPrint(&ry_label_buf, "{d:.3}", .{hit_test_widget.circle.radius_y}));
-                hit_test_widget.updateRender();
-            },
-            rot_drag_start => {
-                rot_ref = hit_test_widget.circle.rot;
-            },
-            rot_dragged => {
-                hit_test_widget.circle.rot = rot_ref + rot_slider.drag_delta_px * 0.001;
-                try rot_value.setText(try std.fmt.bufPrint(&rot_label_buf, "{d:.3}", .{hit_test_widget.circle.rot}));
-                hit_test_widget.updateRender();
+            ids.rot.total.start...ids.rot.total.end => {
+                needs_render |= try rot.service(event, ids.rot);
             },
             else => {},
         };
+
         gui_state.event_queue.clearRetainingCapacity();
+
+        if (needs_render) {
+            hit_test_widget.updateRender();
+        }
 
 
 
