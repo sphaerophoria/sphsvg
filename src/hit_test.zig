@@ -13,7 +13,7 @@ const GlAlloc = sphtud.render.GlAlloc;
 const Vec2 = sphtud.math.Vec2;
 
 fn applyTransformVec2(v: Vec2, transform: sphtud.math.Transform) Vec2 {
-    const ret = transform.apply(.{v[0], v[1], 1});
+    const ret = transform.apply(.{ v[0], v[1], 1 });
     return .{ ret[0] / ret[2], ret[1] / ret[2] };
 }
 
@@ -89,17 +89,17 @@ pub const HitTestWidget = struct {
         gl.glPointSize(20.0);
 
         self.render_program.renderLineLoop(self.circle_source, .{
-            .color = .{1, 1, 1 },
+            .color = .{ 1, 1, 1 },
             .transform = transform.inner,
         });
 
         self.render_program.renderLines(self.ray_source, .{
-            .color = .{0, 1, 0 },
+            .color = .{ 0, 1, 0 },
             .transform = transform.inner,
         });
 
         self.render_program.renderPoints(self.intersections_source, .{
-            .color = .{1, 0, 0 },
+            .color = .{ 1, 0, 0 },
             .transform = transform.inner,
         });
     }
@@ -115,7 +115,6 @@ pub const HitTestWidget = struct {
                 self.down_mask |= 2;
             }
 
-
             if (input_state.mouse_middle_pressed) {
                 self.circle.center = mouseToClip(input_state.mouse_pos, widget_bounds);
                 self.updateRender();
@@ -129,7 +128,6 @@ pub const HitTestWidget = struct {
         if (input_state.mouse_right_released) {
             self.down_mask &= ~@as(u8, 2);
         }
-
 
         if (self.down_mask & 1 != 0) {
             self.ray.start = mouseToClip(input_state.mouse_pos, widget_bounds);
@@ -149,7 +147,7 @@ pub const HitTestWidget = struct {
 
         return .{
             2 * x / asf32(widget_bounds.calcWidth()) - 1.0,
-            - (2 * y / asf32(widget_bounds.calcHeight()) - 1.0),
+            -(2 * y / asf32(widget_bounds.calcHeight()) - 1.0),
         };
     }
 
@@ -157,8 +155,8 @@ pub const HitTestWidget = struct {
         var points: [2]sphtud.render.xyt_program.Vertex = undefined;
         var ray_dir_large = self.ray.dir;
         ray_dir_large *= @splat(3);
-        points[0] = .{ .vPos = self.ray.start};
-        points[1] = .{ .vPos = self.ray.start + ray_dir_large};
+        points[0] = .{ .vPos = self.ray.start };
+        points[1] = .{ .vPos = self.ray.start + ray_dir_large };
 
         self.ray_buf.updateBuffer(&points);
 
@@ -171,7 +169,7 @@ pub const HitTestWidget = struct {
             const x = self.circle.rx * @cos(theta);
             const y = self.circle.ry * @sin(theta);
             const transform = sphtud.math.Transform.rotate(self.circle.rotation).then(.translate(self.circle.center[0], self.circle.center[1]));
-            cp.* = .{ .vPos = applyTransformVec2(.{x, y}, transform) };
+            cp.* = .{ .vPos = applyTransformVec2(.{ x, y }, transform) };
         }
 
         self.circle_buf.updateBuffer(&circle_points);
@@ -179,7 +177,8 @@ pub const HitTestWidget = struct {
 
         var intersection_points_buf: [2]Vec2 = undefined;
         const intersection_points = sphtud.geometry.rayEllipseIntersection(
-            self.ray, self.circle,
+            self.ray,
+            self.circle,
             &intersection_points_buf,
         );
 
@@ -349,7 +348,7 @@ pub fn main() !void {
         },
     );
     const controls_stack = try wf.makeStack(controls_stack_items);
-    const controls_box = try wf.makeBox(&controls_stack.widget, .{ .width = 300, .height = 0 }, .fill_height );
+    const controls_box = try wf.makeBox(&controls_stack.widget, .{ .width = 300, .height = 0 }, .fill_height);
 
     const layout = try wf.makeLayout();
     layout.cursor.direction = .left_to_right;
@@ -399,8 +398,6 @@ pub fn main() !void {
         if (needs_render) {
             hit_test_widget.updateRender();
         }
-
-
 
         window.swapBuffers();
     }

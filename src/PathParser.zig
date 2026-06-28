@@ -89,7 +89,6 @@ pub fn next(self: *PathParser) !?Item {
                     try coord(&self.buf),
                 },
                 Arc => blk: {
-
                     break :blk .{
                         .rx = try coordElem(&self.buf),
                         .ry = try coordElem(&self.buf),
@@ -135,4 +134,3 @@ const command_chars = "MmCcQqZzHhVvLlSsAa";
 fn args(buf: *sphtud.lex.Buf) ?sphtud.lex.Range {
     return buf.takeUntilAny(command_chars);
 }
-

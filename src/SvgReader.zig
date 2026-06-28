@@ -102,7 +102,7 @@ pub fn next(self: *SvgReader) !?Item {
     var discarding = std.Io.Writer.Discarding.init(&.{});
     const dw = &discarding.writer;
 
-    while (true)  {
+    while (true) {
         const elem = try self.xml.next(dw) orelse return null;
         switch (elem.type) {
             .xml_decl => {},
@@ -123,7 +123,6 @@ pub fn next(self: *SvgReader) !?Item {
         }
     }
 }
-
 
 fn parseSvgElem(first_item: ?sphtud.xml.Item) !ViewBox {
     const unwrapped = first_item orelse return error.Invalid;
@@ -155,4 +154,3 @@ fn parseSvgElem(first_item: ?sphtud.xml.Item) !ViewBox {
 
     return view_box orelse return error.Unimplemented;
 }
-

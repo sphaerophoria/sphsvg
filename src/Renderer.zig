@@ -62,7 +62,7 @@ const RowCurvePoint = struct {
 };
 
 // FIXME: Duplicated with ttf renderer
-pub fn findBezierTForY(p1: f32, p2: f32, p3: f32, y: f32) [2]f32 {
+pub fn findQuadBezierTForY(p1: f32, p2: f32, p3: f32, y: f32) [2]f32 {
     // Bezier curve formula comes from lerping p1->p2 by t, p2->p3 by t, and
     // then lerping the line from those two points by t as well
     //
@@ -155,7 +155,7 @@ fn findRowCurvePoints(buf: []RowCurvePoint, curves: sphtud.util.RuntimeSegmented
                 const b_f: @Vector(2, f32) = b.c;
                 const c_f: @Vector(2, f32) = b.end;
 
-                const ts = findBezierTForY(a_f[1], b_f[1], c_f[1], @floatFromInt(y));
+                const ts = findQuadBezierTForY(a_f[1], b_f[1], c_f[1], @floatFromInt(y));
 
                 for (ts, 0..) |t, i| {
                     if (!(t >= 0.0 and t <= 1.0)) {
@@ -209,34 +209,41 @@ fn findRowCurvePoints(buf: []RowCurvePoint, curves: sphtud.util.RuntimeSegmented
 pub fn renderPathToImage(self: *Renderer, scratch: sphtud.alloc.LinearAllocator, path: Path, color: sphtud.math.Vec3, out: sphtud.img.Image) !void {
     if (path.len == 0) return;
 
-    std.debug.assert(out.width == @as(usize, @intFromFloat(self.br[0] - self.tl[0])));
-    std.debug.assert(out.calcHeight() == @as(usize, @intFromFloat(self.br[1] - self.tl[1])));
+    const in_width = self.br[0] - self.tl[0];
+    const in_height = self.br[1] - self.tl[1];
 
     var y: i64 = 0;
-    const height = out.calcHeight();
+    const out_height: i64 = @intCast(out.calcHeight());
+    const out_height_f: f64 = @floatFromInt(out_height);
 
     const buf = try scratch.allocator().alloc(RowCurvePoint, path.len);
 
-    while (y < height) {
+    while (y < out_height) {
         defer y += 1;
 
         const cp = scratch.checkpoint();
         defer scratch.restore(cp);
 
-        const points = try findRowCurvePoints(buf, path, y);
+        const y_f: f32 = @floatFromInt(y);
+        const points = try findRowCurvePoints(buf, path, @intFromFloat(y_f * in_height / out_height_f));
         for (points) |p| {
             switch (out.data) {
                 inline else => |d| {
-                    const px = sphtud.img.RgbF32Pixel {
+                    const out_x: i64 = @intFromFloat(asf32(p.x_pos) * asf32(out.width) / in_width);
+                    const px = sphtud.img.RgbF32Pixel{
                         .r = color[0],
                         .g = color[1],
                         .b = color[2],
                     };
-                    d.write(@intCast(y * out.width + p.x_pos), .from(px));
+                    d.write(@intCast(y * out.width + out_x), .from(px));
                 },
             }
         }
     }
+}
+
+fn asf32(val: anytype) f32 {
+    return @floatFromInt(val);
 }
 
 pub fn renderPath(self: *Renderer, scratch: std.mem.Allocator, path: Path, color: sphtud.math.Vec3) !void {
@@ -247,8 +254,12 @@ pub fn renderPath(self: *Renderer, scratch: std.mem.Allocator, path: Path, color
     var it = path.iter();
     while (it.next()) |inst| switch (inst.*) {
         .line => |m| {
-            try buf_data.append(scratch, .{ .vPos = m.start, });
-            try buf_data.append(scratch, .{ .vPos = m.end, });
+            try buf_data.append(scratch, .{
+                .vPos = m.start,
+            });
+            try buf_data.append(scratch, .{
+                .vPos = m.end,
+            });
         },
         .cubic_bezier => |bezier| {
             const start = bezier.start;
@@ -258,7 +269,7 @@ pub fn renderPath(self: *Renderer, scratch: std.mem.Allocator, path: Path, color
 
             var last = bezier.start;
             for (0..bezier_resolution) |i| {
-                const t: sphtud.math.Vec2 = @splat(1.0 / @as(f32,bezier_resolution) * @as(f32, @floatFromInt(i + 1)));
+                const t: sphtud.math.Vec2 = @splat(1.0 / @as(f32, bezier_resolution) * @as(f32, @floatFromInt(i + 1)));
 
                 const a = std.math.lerp(start, c1, t);
                 const b = std.math.lerp(c1, c2, t);
@@ -281,16 +292,16 @@ pub fn renderPath(self: *Renderer, scratch: std.mem.Allocator, path: Path, color
                 .translate(arc.center[0], arc.center[1]),
             );
 
-            var last = transform.apply(.{arc.rx * @cos(arc.start_theta), arc.ry * @sin(arc.start_theta), 1});
+            var last = transform.apply(.{ arc.rx * @cos(arc.start_theta), arc.ry * @sin(arc.start_theta), 1 });
 
             for (0..bezier_resolution) |i| {
                 const t: f32 = 1.0 / @as(f32, bezier_resolution) * @as(f32, @floatFromInt(i + 1));
                 const theta = arc.start_theta + arc.delta_theta * t;
 
-                const val = transform.apply(.{arc.rx * @cos(theta), arc.ry * @sin(theta), 1});
+                const val = transform.apply(.{ arc.rx * @cos(theta), arc.ry * @sin(theta), 1 });
 
-                try buf_data.append(scratch, .{ .vPos = .{last[0], last[1]} });
-                try buf_data.append(scratch, .{ .vPos = .{val[0], val[1]} });
+                try buf_data.append(scratch, .{ .vPos = .{ last[0], last[1] } });
+                try buf_data.append(scratch, .{ .vPos = .{ val[0], val[1] } });
                 last = val;
             }
         },
@@ -315,8 +326,7 @@ fn renderVertexList(self: *Renderer, buf_data: []const xyt.Vertex, color: sphtud
     const width = self.br[0] - self.tl[0];
     const height = self.br[1] - self.tl[1];
     const transform = sphtud.math.Transform.translate(-cx, -cy)
-        .then(.scale(2.0 / width, -2.0 / height))
-    ;
+        .then(.scale(2.0 / width, -2.0 / height));
 
     self.prog.renderLines(s, .{
         .color = color,
