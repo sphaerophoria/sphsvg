@@ -199,35 +199,57 @@ const Sampler = struct {
                         }
                     }
                 },
-                //.cubic_bezier => |c| {
-                //    const Case = struct {
-                //        y: f32,
-                //        how: PixelCross.How,
-                //    };
-                //    const cases: []const Case = &.{
-                //        .{ .y = y - self.hysterisis_size,       .how = .leave_top },
-                //        .{ .y = y + self.hysterisis_size,       .how = .enter_top },
-                //        .{ .y = y + 1.0 + self.hysterisis_size, .how = .leave_bottom },
-                //        .{ .y = y + 1.0 - self.hysterisis_size, .how = .enter_bottom },
-                //    };
+                .cubic_bezier => |c| {
+                    const Case = struct {
+                        y: f32,
+                        how: PixelCross.How,
+                    };
+                    const cases: []const Case = &.{
+                        .{ .y = y,       .how = .leave_top },
+                        //.{ .y = y - self.hysterisis_size,       .how = .leave_top },
+                        //.{ .y = y + self.hysterisis_size,       .how = .enter_top },
+                        //.{ .y = y + 1.0 + self.hysterisis_size, .how = .leave_bottom },
+                        //.{ .y = y + 1.0 - self.hysterisis_size, .how = .enter_bottom },
+                    };
 
-                //    for (cases) |case| {
-                //        const ts = cubicBezierTForY(c, case.y);
-                //        for (ts) |t| {
-                //            const dir = cubicBezierDirAtT(c, t);
-                //            const dir_matches_how = switch (case.how) {
-                //                .enter_bottom, .leave_top => dir[1] < 0,
-                //                .leave_bottom, .enter_top => dir[1] > 0,
-                //            };
-                //            if (!dir_matches_how) continue;
-                //            const pos = cubicBezierAtT(c, t);
-                //            try crosses.appendBounded(.{
-                //                .x_pos = pos[0],
-                //                .how = case.how,
-                //            });
-                //        }
-                //    }
-                //},
+                    // From wolfram alpha "collect (1-t)^3*a + 3*(1-t)^2*b + 3(1-t)t^2*c + t^3 * d, t"
+                    // t^2 (3 a + 3 b + 3 c) + t (-3 a - 6 b) + t^3 (-a - 3 c + d) + a + 3 b
+                    const cubic = Cubic {
+                        .a = c.end[1] - c.start[1] - 3 * c.c2[1],
+                        .b = 3 * (c.start[1] + c.c1[1] + c.c2[1]),
+                        .c = -3 * c.start[1] - 6 * c.c1[1],
+                        .d = c.start[1] + 3 * c.c1[1],
+                    };
+
+                    for (cases) |case| {
+                        const ts = cubicTForY(cubic, case.y);
+                        for (ts.buf[0..ts.len]) |t| {
+                            if (t < 0 or t > 1) continue;
+
+                            std.debug.print("t: {d}\n", .{t});
+                            const sampled_y = cubicBezierYAtT(c, t);
+                            std.debug.print("actual y: {d}, sampled y: {d}\n", .{sampled_y, y});
+                            std.debug.assert(@abs(sampled_y - y) < 1e-6);
+
+                            //const dir = cubicBezierDirAtT(c, t);
+                            //if (dir[1] < 1e-6) continue;
+                            //const dir_matches_how = switch (case.how) {
+                            //    .enter_bottom, .leave_top => dir[1] < 0,
+                            //    .leave_bottom, .enter_top => dir[1] > 0,
+                            //};
+                            //if (!dir_matches_how) continue;
+                            const pos = cubicBezierXAtT(c, t);
+                            try crosses.appendBounded(.{
+                                .x_pos = pos,
+                                .how = .enter_top,
+                            });
+                            try crosses.appendBounded(.{
+                                .x_pos = pos,
+                                .how = .leave_bottom,
+                            });
+                        }
+                    }
+                },
                 else => {},
             };
 
@@ -289,15 +311,48 @@ const Sampler = struct {
         try std.testing.expectApproxEqAbs(5.0, res, 0.001);
     }
 
-    const CubicBezierIntersections = struct {
-        buf: [3]f32,
-        len: u8,
+    const Cubic = struct {
+        a: f32,
+        b: f32,
+        c: f32,
+        d: f32,
     };
 
-    //fn cubicBezierTForY(c: CubicBezier, y: f32) CubicBezierIntersections {
-    //    // https://en.wikipedia.org/wiki/B%C3%A9zier_curve
-    //    // (1-t)^3*start + 3(1-t)^2*t*c.c1 + 3 * (1-t)*t^2*c.c2 + t^3*end
-    //}
+    fn cubicTForY(c: Cubic, y: f32) sphtud.math.CubicSolution {
+        // cubic = y, move y to other side and solve
+        return sphtud.math.solveCubic(c.a, c.b, c.c, c.d - y);
+    }
+
+    fn cubicBezierDirAtT(c: CubicBezier, t: f32) sphtud.math.Vec2 {
+        // Derivative from https://en.wikipedia.org/wiki/B%C3%A9zier_curve#Cubic_B%C3%A9zier_curves
+        const inv_t: sphtud.math.Vec2 = @splat(1 - t);
+        const inv_t_2 = inv_t * inv_t;
+        const t_2: sphtud.math.Vec2 = @splat(t * t);
+        const t_v: sphtud.math.Vec2 = @splat(t);
+        return sphtud.math.Vec2{3, 3} * inv_t_2 * (c.c1 - c.start) + sphtud.math.Vec2{6, 6} * inv_t*t_v*(c.c2 - c.c1) + sphtud.math.Vec2{3, 3} * t_2 * (c.end - c.c2);
+    }
+
+    fn cubicBezierXAtT(bez: CubicBezier, t: f32) f32 {
+        const a = std.math.lerp(bez.start[0], bez.c1[0], t);
+        const b = std.math.lerp(bez.c1[0], bez.c2[0], t);
+        const c = std.math.lerp(bez.c2[0], bez.end[0], t);
+
+        const d = std.math.lerp(a, b, t);
+        const e = std.math.lerp(b, c, t);
+
+        return std.math.lerp(d, e, t);
+    }
+
+    fn cubicBezierYAtT(bez: CubicBezier, t: f32) f32 {
+        const a = std.math.lerp(bez.start[1], bez.c1[1], t);
+        const b = std.math.lerp(bez.c1[1], bez.c2[1], t);
+        const c = std.math.lerp(bez.c2[1], bez.end[1], t);
+
+        const d = std.math.lerp(a, b, t);
+        const e = std.math.lerp(b, c, t);
+
+        return std.math.lerp(d, e, t);
+    }
 };
 
 pub fn renderPathToImage(self: *Renderer, path: Path, color: sphtud.math.Vec3, out: sphtud.img.Image) !void {
