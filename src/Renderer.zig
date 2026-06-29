@@ -19,7 +19,8 @@ const Uniforms = struct {
     transform: sphtud.math.Mat3x3,
 };
 
-pub const Path = sphtud.util.RuntimeSegmentedList(Action);
+pub const Contour = sphtud.util.RuntimeSegmentedList(Action);
+pub const Path = sphtud.util.RuntimeSegmentedList(Contour);
 pub const Point = sphtud.math.Vec2;
 
 pub const CubicBezier = struct {
@@ -44,10 +45,7 @@ pub const Arc = struct {
     delta_theta: f32,
 };
 
-pub const Line = struct {
-    start: Point,
-    end: Point,
-};
+pub const Line = sphtud.geometry.Line2;
 
 pub const Action = union(enum) {
     line: Line,
@@ -56,9 +54,16 @@ pub const Action = union(enum) {
     arc: Arc,
 };
 
-const RowCurvePoint = struct {
-    x_pos: i64,
-    entering: bool,
+const PixelCross = struct {
+    x_pos: f32,
+    how: How,
+
+    const How = enum {
+        leave_top,
+        enter_top,
+        leave_bottom,
+        enter_bottom,
+    };
 };
 
 // FIXME: Duplicated with ttf renderer
@@ -124,122 +129,254 @@ pub fn sampleQuadBezierCurve(a: @Vector(2, f32), b: @Vector(2, f32), c: @Vector(
     return std.math.lerp(tangent_line.a, tangent_line.b, @as(@Vector(2, f32), @splat(t)));
 }
 
-fn findRowCurvePoints(buf: []RowCurvePoint, curves: sphtud.util.RuntimeSegmentedList(Action), y: i64) ![]RowCurvePoint {
-    var ret = std.ArrayList(RowCurvePoint).initBuffer(buf);
+const WindingChange = struct {
+    pos: f32,
+    change: i8,
+};
+// FIXME: Bad name
+const Sampler = struct {
+    hysterisis_size: f32,
+    // FIXME: lol buf names
+    buf: []PixelCross,
+    buf2: []WindingChange,
+    path: Path,
 
-    var it = curves.iter();
+    const WindingChangeIter = struct {
+        crosses: []const PixelCross,
+        idx: usize = 0,
+        last: PixelCross.How,
 
-    while (it.next()) |curve| {
-        switch (curve.*) {
-            .line => |l| {
-                const a_f = l.start;
-                const b_f = l.end;
-                const y_f: f32 = @floatFromInt(y);
+        pub fn next(self: *WindingChangeIter) ?WindingChange {
+            // Note we have to check the wraparound case
+            while (self.idx < self.crosses.len + 1) {
+                defer self.idx += 1;
 
-                if (l.end[1] == l.start[1]) continue;
-                const t = (y_f - a_f[1]) / (b_f[1] - a_f[1]);
+                const val = self.crosses[self.idx % self.crosses.len];
+                defer self.last = val.how;
 
-                if (!(t >= 0.0 and t <= 1.0)) {
-                    continue;
+                if (val.how == .leave_top and self.last == .enter_bottom) {
+                    return .{
+                        .pos = val.x_pos,
+                        .change = 1,
+                    };
+                } else if (val.how == .leave_bottom and self.last == .enter_top) {
+                    return .{
+                        .pos = val.x_pos,
+                        .change = -1,
+                    };
                 }
+            }
 
-                const x = std.math.lerp(a_f[0], b_f[0], t);
-
-                const x_pos_i: i64 = @intFromFloat(@round(x));
-                const entering = l.start[1] < l.end[1];
-
-                try ret.appendBounded(.{ .entering = entering, .x_pos = x_pos_i });
-            },
-            .quad_bezier => |b| {
-                const a_f: @Vector(2, f32) = b.start;
-                const b_f: @Vector(2, f32) = b.c;
-                const c_f: @Vector(2, f32) = b.end;
-
-                const ts = findQuadBezierTForY(a_f[1], b_f[1], c_f[1], @floatFromInt(y));
-
-                for (ts, 0..) |t, i| {
-                    if (!(t >= 0.0 and t <= 1.0)) {
-                        continue;
-                    }
-                    const tangent_line = quadBezierTangentLine(a_f, b_f, c_f, t);
-
-                    const eps = 1e-7;
-                    const at_apex = @abs(tangent_line.a[1] - tangent_line.b[1]) < eps;
-                    const at_end = t < eps or @abs(t - 1.0) < eps;
-                    const moving_up = tangent_line.a[1] < tangent_line.b[1] or b.start[1] < b.end[1];
-
-                    // If we are at the apex, and at the very edge of a curve,
-                    // we have to be careful. In this case we can only count
-                    // one of the enter/exit events as we are only half of the
-                    // parabola.
-                    //
-                    // U -> enter/exit
-                    // \_ -> enter
-                    // _/ -> exit
-                    //  _
-                    // / -> enter
-                    // _
-                    //  \-> exit
-
-                    // The only special case is that we are at the apex, and at
-                    // the end of the curve. In this case we only want to
-                    // consider one of the two points. Otherwise we just ignore
-                    // the apex as it's an immediate enter/exit. I.e. useless
-                    //
-                    // This boils down to the following condition
-                    if (at_apex and (!at_end or i == 1)) continue;
-
-                    const x_f = sampleQuadBezierCurve(a_f, b_f, c_f, t)[0];
-                    const x_px: i64 = @intFromFloat(@round(x_f));
-                    try ret.appendBounded(.{
-                        .entering = moving_up,
-                        .x_pos = x_px,
-                    });
-                }
-            },
-            .cubic_bezier, .arc => {
-                // Ellipse is defined by
-            },
+            return null;
         }
+    };
+
+    fn executeScanline(self: *Sampler, y: f32) ![]WindingChange {
+        var it = self.path.iter();
+
+        var ret = std.ArrayList(WindingChange).initBuffer(self.buf2);
+
+        while (it.next()) |contour| {
+            var contour_it = contour.iter();
+            var crosses = std.ArrayList(PixelCross).initBuffer(self.buf);
+            while (contour_it.next()) |segment| switch (segment.*) {
+                .line => |line| {
+                    if (slopePositive(line)) {
+                        if (lineXForY(line, y - self.hysterisis_size)) |x| {
+                            try crosses.appendBounded(.{ .x_pos = x, .how = .leave_top });
+                        }
+
+                        if (lineXForY(line, y + 1.0 - self.hysterisis_size)) |x| {
+                            try crosses.appendBounded(.{ .x_pos = x, .how = .enter_bottom });
+                        }
+                    } else {
+                        if (lineXForY(line, y + self.hysterisis_size)) |x| {
+                            try crosses.appendBounded(.{ .x_pos = x, .how = .enter_top });
+                        }
+
+                        if (lineXForY(line, y + 1.0 + self.hysterisis_size)) |x| {
+                            try crosses.appendBounded(.{ .x_pos = x, .how = .leave_bottom });
+                        }
+                    }
+                },
+                //.cubic_bezier => |c| {
+                //    const Case = struct {
+                //        y: f32,
+                //        how: PixelCross.How,
+                //    };
+                //    const cases: []const Case = &.{
+                //        .{ .y = y - self.hysterisis_size,       .how = .leave_top },
+                //        .{ .y = y + self.hysterisis_size,       .how = .enter_top },
+                //        .{ .y = y + 1.0 + self.hysterisis_size, .how = .leave_bottom },
+                //        .{ .y = y + 1.0 - self.hysterisis_size, .how = .enter_bottom },
+                //    };
+
+                //    for (cases) |case| {
+                //        const ts = cubicBezierTForY(c, case.y);
+                //        for (ts) |t| {
+                //            const dir = cubicBezierDirAtT(c, t);
+                //            const dir_matches_how = switch (case.how) {
+                //                .enter_bottom, .leave_top => dir[1] < 0,
+                //                .leave_bottom, .enter_top => dir[1] > 0,
+                //            };
+                //            if (!dir_matches_how) continue;
+                //            const pos = cubicBezierAtT(c, t);
+                //            try crosses.appendBounded(.{
+                //                .x_pos = pos[0],
+                //                .how = case.how,
+                //            });
+                //        }
+                //    }
+                //},
+                else => {},
+            };
+
+            if (crosses.items.len < 1) continue;
+
+            var winding_it = WindingChangeIter {
+                .crosses = crosses.items,
+                .idx = 1,
+                .last = crosses.items[0].how,
+            };
+
+            while (winding_it.next()) |change| {
+                try ret.appendBounded(change);
+            }
+        }
+
+        return ret.items;
     }
 
-    return ret.items;
-}
+    fn slopePositive(l: Line) bool {
+        const right = sphtud.math.Vec2{1, 0};
+        return sphtud.math.cross2(right, l.dir()) > 0;
+    }
 
-pub fn renderPathToImage(self: *Renderer, scratch: sphtud.alloc.LinearAllocator, path: Path, color: sphtud.math.Vec3, out: sphtud.img.Image) !void {
+    test "slopePositive" {
+        try std.testing.expectEqual(true, slopePositive(.{ .a = .{0, 0}, .b = .{1, 1}}));
+        try std.testing.expectEqual(false, slopePositive(.{ .a = .{0, 0}, .b = .{0, 0}}));
+        try std.testing.expectEqual(false, slopePositive(.{ .a = .{0, 0}, .b = .{1, -1}}));
+    }
+
+    fn lineXForY(l: Line, y: f32) ?f32 {
+        var min_y = l.a[1];
+        var max_y = l.b[1];
+
+        if (min_y > max_y) std.mem.swap(f32, &min_y, &max_y);
+        if (y < min_y or y > max_y) return null;
+
+        const eps = 1e-7;
+
+        //y = lerp(start, end, t);
+        //y = l.a[1] + t*(l.b[1] - l.a[1]);
+        //(y - l.a[1]) / (l.b[1] - l.a[1]) = t
+        //x = l.a[0] + t*(l.b[0] - l.a[0]);
+        const div = (l.b[1] - l.a[1]);
+        // Relatively horizontal line. This cannot contribute to our winding
+        // counts, so we just ignore
+        if (div < eps) return null;
+        const t = (y - l.a[1]) / div;
+
+        return std.math.lerp(l.a[0], l.b[0], t);
+    }
+
+    test "lineXForY" {
+
+        const res = lineXForY(.{
+            .a = .{0, 0},
+            .b = .{10, 10},
+        }, 5.0) orelse return error.NoPoint;
+        try std.testing.expectApproxEqAbs(5.0, res, 0.001);
+    }
+
+    const CubicBezierIntersections = struct {
+        buf: [3]f32,
+        len: u8,
+    };
+
+    //fn cubicBezierTForY(c: CubicBezier, y: f32) CubicBezierIntersections {
+    //    // https://en.wikipedia.org/wiki/B%C3%A9zier_curve
+    //    // (1-t)^3*start + 3(1-t)^2*t*c.c1 + 3 * (1-t)*t^2*c.c2 + t^3*end
+    //}
+};
+
+pub fn renderPathToImage(self: *Renderer, path: Path, color: sphtud.math.Vec3, out: sphtud.img.Image) !void {
     if (path.len == 0) return;
 
     const in_width = self.br[0] - self.tl[0];
     const in_height = self.br[1] - self.tl[1];
 
-    var y: i64 = 0;
     const out_height: i64 = @intCast(out.calcHeight());
-    const out_height_f: f64 = @floatFromInt(out_height);
+    const out_height_f: f32 = @floatFromInt(out_height);
+    const out_width_f: f32 = @floatFromInt(out.width);
 
-    const buf = try scratch.allocator().alloc(RowCurvePoint, path.len);
+    // FIXME: Calculate based off max contour size * max crosses per segment or something
+    const max_crosses = 1024;
+    var cross_buf: [max_crosses]PixelCross = undefined;
+    var windings_buf: [max_crosses]WindingChange = undefined;
 
-    while (y < out_height) {
-        defer y += 1;
+    const pixel_height = in_height / out_height_f;
+    var sampler = Sampler {
+        .hysterisis_size = pixel_height / 8,
+        .buf = &cross_buf,
+        .buf2 = &windings_buf,
+        .path = path,
+    };
 
-        const cp = scratch.checkpoint();
-        defer scratch.restore(cp);
+    for (0..out.calcHeight()) |out_y| {
+        var in_y: f32 = @floatFromInt(out_y);
+        in_y *= in_height / out_height_f;
+        const scanline_windings = try sampler.executeScanline(in_y);
 
-        const y_f: f32 = @floatFromInt(y);
-        const points = try findRowCurvePoints(buf, path, @intFromFloat(y_f * in_height / out_height_f));
-        for (points) |p| {
+        var x_idx: usize = 0;
+        var winding_count: i32 = 0;
+        const px = sphtud.img.RgbF32Pixel{
+            .r = color[0],
+            .g = color[1],
+            .b = color[2],
+        };
+        for (scanline_windings) |winding| {
+            winding_count += winding.change;
+
+            const out_x: i64 = @intFromFloat(winding.pos * out_width_f / in_width);
+            if (out_x < 0) continue;
+
+            const out_x_u: usize = @intCast(out_x);
+            defer x_idx = out_x_u;
+
+            // FIXME: SVG spec defines multiple fill rules
             switch (out.data) {
                 inline else => |d| {
-                    const out_x: i64 = @intFromFloat(asf32(p.x_pos) * asf32(out.width) / in_width);
-                    const px = sphtud.img.RgbF32Pixel{
-                        .r = color[0],
-                        .g = color[1],
-                        .b = color[2],
-                    };
-                    d.write(@intCast(y * out.width + out_x), .from(px));
-                },
+                    d.write(out_y * out.width + out_x_u, .from(px));
+                }
             }
         }
     }
+
+    //const buf = try scratch.allocator().alloc(RowCurvePoint, path.len);
+
+    //while (y < out_height) {
+    //    defer y += 1;
+
+    //    const cp = scratch.checkpoint();
+    //    defer scratch.restore(cp);
+
+    //    const y_f: f32 = @floatFromInt(y);
+    //    const points = try findRowCurvePoints(buf, path, @intFromFloat(y_f * in_height / out_height_f));
+    //    for (points) |p| {
+    //        switch (out.data) {
+    //            inline else => |d| {
+    //                const out_x: i64 = @intFromFloat(asf32(p.x_pos) * asf32(out.width) / in_width);
+    //                const px = sphtud.img.RgbF32Pixel{
+    //                    .r = color[0],
+    //                    .g = color[1],
+    //                    .b = color[2],
+    //                };
+    //                d.write(@intCast(y * out.width + out_x), .from(px));
+    //            },
+    //        }
+    //    }
+    //}
 }
 
 fn asf32(val: anytype) f32 {
@@ -252,60 +389,63 @@ pub fn renderPath(self: *Renderer, scratch: std.mem.Allocator, path: Path, color
     var buf_data: std.ArrayList(xyt.Vertex) = .empty;
 
     var it = path.iter();
-    while (it.next()) |inst| switch (inst.*) {
-        .line => |m| {
-            try buf_data.append(scratch, .{
-                .vPos = m.start,
-            });
-            try buf_data.append(scratch, .{
-                .vPos = m.end,
-            });
-        },
-        .cubic_bezier => |bezier| {
-            const start = bezier.start;
-            const c1 = bezier.c1;
-            const c2 = bezier.c2;
-            const end = bezier.end;
+    while (it.next()) |contour| {
+        var contour_it = contour.iter();
+        while (contour_it.next()) |inst| switch (inst.*) {
+            .line => |m| {
+                try buf_data.append(scratch, .{
+                    .vPos = m.a,
+                });
+                try buf_data.append(scratch, .{
+                    .vPos = m.b,
+                });
+            },
+            .cubic_bezier => |bezier| {
+                const start = bezier.start;
+                const c1 = bezier.c1;
+                const c2 = bezier.c2;
+                const end = bezier.end;
 
-            var last = bezier.start;
-            for (0..bezier_resolution) |i| {
-                const t: sphtud.math.Vec2 = @splat(1.0 / @as(f32, bezier_resolution) * @as(f32, @floatFromInt(i + 1)));
+                var last = bezier.start;
+                for (0..bezier_resolution) |i| {
+                    const t: sphtud.math.Vec2 = @splat(1.0 / @as(f32, bezier_resolution) * @as(f32, @floatFromInt(i + 1)));
 
-                const a = std.math.lerp(start, c1, t);
-                const b = std.math.lerp(c1, c2, t);
-                const c = std.math.lerp(c2, end, t);
+                    const a = std.math.lerp(start, c1, t);
+                    const b = std.math.lerp(c1, c2, t);
+                    const c = std.math.lerp(c2, end, t);
 
-                const d = std.math.lerp(a, b, t);
-                const e = std.math.lerp(b, c, t);
+                    const d = std.math.lerp(a, b, t);
+                    const e = std.math.lerp(b, c, t);
 
-                const p = std.math.lerp(d, e, t);
-                try buf_data.append(scratch, .{ .vPos = last });
-                try buf_data.append(scratch, .{ .vPos = p });
-                last = p;
-            }
-        },
-        .quad_bezier => {
-            unreachable;
-        },
-        .arc => |arc| {
-            const transform = sphtud.math.Transform.rotate(arc.rot).then(
-                .translate(arc.center[0], arc.center[1]),
-            );
+                    const p = std.math.lerp(d, e, t);
+                    try buf_data.append(scratch, .{ .vPos = last });
+                    try buf_data.append(scratch, .{ .vPos = p });
+                    last = p;
+                }
+            },
+            .quad_bezier => {
+                unreachable;
+            },
+            .arc => |arc| {
+                const transform = sphtud.math.Transform.rotate(arc.rot).then(
+                    .translate(arc.center[0], arc.center[1]),
+                );
 
-            var last = transform.apply(.{ arc.rx * @cos(arc.start_theta), arc.ry * @sin(arc.start_theta), 1 });
+                var last = transform.apply(.{ arc.rx * @cos(arc.start_theta), arc.ry * @sin(arc.start_theta), 1 });
 
-            for (0..bezier_resolution) |i| {
-                const t: f32 = 1.0 / @as(f32, bezier_resolution) * @as(f32, @floatFromInt(i + 1));
-                const theta = arc.start_theta + arc.delta_theta * t;
+                for (0..bezier_resolution) |i| {
+                    const t: f32 = 1.0 / @as(f32, bezier_resolution) * @as(f32, @floatFromInt(i + 1));
+                    const theta = arc.start_theta + arc.delta_theta * t;
 
-                const val = transform.apply(.{ arc.rx * @cos(theta), arc.ry * @sin(theta), 1 });
+                    const val = transform.apply(.{ arc.rx * @cos(theta), arc.ry * @sin(theta), 1 });
 
-                try buf_data.append(scratch, .{ .vPos = .{ last[0], last[1] } });
-                try buf_data.append(scratch, .{ .vPos = .{ val[0], val[1] } });
-                last = val;
-            }
-        },
-    };
+                    try buf_data.append(scratch, .{ .vPos = .{ last[0], last[1] } });
+                    try buf_data.append(scratch, .{ .vPos = .{ val[0], val[1] } });
+                    last = val;
+                }
+            },
+        };
+    }
 
     try self.renderVertexList(buf_data.items, color);
 }
@@ -332,4 +472,9 @@ fn renderVertexList(self: *Renderer, buf_data: []const xyt.Vertex, color: sphtud
         .color = color,
         .transform = transform.inner,
     });
+}
+
+test {
+    _ = Sampler;
+    std.testing.refAllDecls(@This());
 }

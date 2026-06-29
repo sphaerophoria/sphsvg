@@ -114,6 +114,7 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
 
     // FIXME: Find a reasonable upper bound
     var render_path = try Renderer.Path.init(scratch.allocator(), .linear(scratch.allocator()), 16, 32 * 1024);
+    var contour = try Renderer.Contour.init(scratch.allocator(), .linear(scratch.allocator()), 16, 32 * 1024);
     var cursor = Renderer.Point{ 0, 0 };
     // FIXME: Default color maybe comes from renderer?
 
@@ -130,42 +131,45 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
 
     var pp = PathParser.init(path.instructions);
 
+
     while (try pp.next()) |item| {
         switch (item) {
             .abs_move => |m| {
                 cursor = m;
                 cursor_start = cursor;
+                try render_path.append(contour);
+                contour = try Renderer.Contour.init(scratch.allocator(), .linear(scratch.allocator()), 16, 32 * 1024);
             },
             .abs_line => |m| {
                 const start = cursor;
                 cursor = m;
-                try render_path.append(.{
+                try contour.append(.{
                     .line = .{
-                        .start = start,
-                        .end = cursor,
+                        .a = start,
+                        .b = cursor,
                     },
                 });
             },
             .abs_horizontal_line => |x| {
                 const start = cursor;
                 cursor[0] = x;
-                try render_path.append(.{ .line = .{
-                    .start = start,
-                    .end = cursor,
+                try contour.append(.{ .line = .{
+                    .a = start,
+                    .b = cursor,
                 } });
             },
             .abs_vertical_line => |y| {
                 const start = cursor;
                 cursor[1] = y;
-                try render_path.append(.{ .line = .{
-                    .start = start,
-                    .end = cursor,
+                try contour.append(.{ .line = .{
+                    .a = start,
+                    .b = cursor,
                 } });
             },
             .abs_cubic_bezier => |b| {
                 const start = cursor;
                 cursor = b[2];
-                try render_path.append(.{
+                try contour.append(.{
                     .cubic_bezier = .{
                         .start = start,
                         .c1 = b[0],
@@ -177,7 +181,7 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
             .abs_quad_bezier => |b| {
                 const start = cursor;
                 cursor = b[1];
-                try render_path.append(.{
+                try contour.append(.{
                     .quad_bezier = .{
                         .start = start,
                         .c = b[0],
@@ -188,7 +192,7 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
             .abs_cubic_bezier_seq => |b| {
                 const c1 = reflectCubicBezier(cursor, b[0], b[1]);
 
-                try render_path.append(.{
+                try contour.append(.{
                     .cubic_bezier = .{
                         .start = cursor,
                         .c1 = c1,
@@ -199,7 +203,7 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
                 cursor = b[1];
             },
             .abs_arc => |params| {
-                try render_path.append(.{
+                try contour.append(.{
                     .arc = svgToRenderArc(cursor, params),
                 });
 
@@ -212,25 +216,25 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
             .rel_line => |m| {
                 const start = cursor;
                 cursor += m;
-                try render_path.append(.{ .line = .{
-                    .start = start,
-                    .end = cursor,
+                try contour.append(.{ .line = .{
+                    .a = start,
+                    .b = cursor,
                 } });
             },
             .rel_horizontal_line => |x| {
                 const start = cursor;
                 cursor[0] += x;
-                try render_path.append(.{ .line = .{
-                    .start = start,
-                    .end = cursor,
+                try contour.append(.{ .line = .{
+                    .a = start,
+                    .b = cursor,
                 } });
             },
             .rel_vertical_line => |y| {
                 const start = cursor;
                 cursor[1] += y;
-                try render_path.append(.{ .line = .{
-                    .start = start,
-                    .end = cursor,
+                try contour.append(.{ .line = .{
+                    .a = start,
+                    .b = cursor,
                 } });
             },
             .rel_cubic_bezier => |b| {
@@ -239,7 +243,7 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
                 const c2 = cursor + b[1];
                 cursor += b[2];
 
-                try render_path.append(.{
+                try contour.append(.{
                     .cubic_bezier = .{
                         .start = start,
                         .c1 = c1,
@@ -253,7 +257,7 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
                 const c = cursor + b[0];
                 cursor += b[1];
 
-                try render_path.append(.{
+                try contour.append(.{
                     .quad_bezier = .{
                         .start = start,
                         .c = c,
@@ -266,7 +270,7 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
                 const c2 = cursor + b[0];
                 const c1 = reflectCubicBezier(cursor, c2, end);
 
-                try render_path.append(.{
+                try contour.append(.{
                     .cubic_bezier = .{
                         .start = cursor,
                         .c1 = c1,
@@ -286,25 +290,27 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
                     .end = cursor + rel_params.end,
                 };
 
-                try render_path.append(.{
+                try contour.append(.{
                     .arc = svgToRenderArc(cursor, params),
                 });
 
                 cursor = params.end;
             },
             .close => {
-                try render_path.append(.{
+                try contour.append(.{
                     .line = .{
-                        .start = cursor,
-                        .end = cursor_start,
+                        .a = cursor,
+                        .b = cursor_start,
                     },
                 });
             },
         }
     }
 
+    try render_path.append(contour);
+
     try renderer.renderPath(scratch.allocator(), render_path, color);
-    try renderer.renderPathToImage(scratch, render_path, color, out);
+    try renderer.renderPathToImage(render_path, color, out);
 }
 
 pub const solid_color_frag =
