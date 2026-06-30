@@ -12,11 +12,6 @@ const GlAlloc = sphtud.render.GlAlloc;
 
 const Vec2 = sphtud.math.Vec2;
 
-fn applyTransformVec2(v: Vec2, transform: sphtud.math.Transform) Vec2 {
-    const ret = transform.apply(.{ v[0], v[1], 1 });
-    return .{ ret[0] / ret[2], ret[1] / ret[2] };
-}
-
 pub const HitTestWidget = struct {
     render_program: sphtud.render.xyt_program.SolidColorProgram,
 
@@ -169,7 +164,7 @@ pub const HitTestWidget = struct {
             const x = self.circle.rx * @cos(theta);
             const y = self.circle.ry * @sin(theta);
             const transform = sphtud.math.Transform.rotate(self.circle.rotation).then(.translate(self.circle.center[0], self.circle.center[1]));
-            cp.* = .{ .vPos = applyTransformVec2(.{ x, y }, transform) };
+            cp.* = .{ .vPos = transform.apply2(.{x, y}) };
         }
 
         self.circle_buf.updateBuffer(&circle_points);
@@ -195,34 +190,22 @@ fn asf32(val: anytype) f32 {
     return @floatFromInt(val);
 }
 
-const ignore = 0;
-const rx_dragged = 1;
-const rx_drag_start = 2;
-const ry_dragged = 3;
-const ry_drag_start = 4;
-const rot_dragged = 5;
-const rot_drag_start = 6;
-
 const Ids = struct {
-    rx: DragIds,
-    ry: DragIds,
-    rot: DragIds,
+    rx: usize,
+    ry: usize,
+    rot: usize,
 
     fn init() Ids {
         var alloc = sphtud.util.IdAlloc.init;
         return .{
-            .rx = .init(&alloc),
-            .ry = .init(&alloc),
-            .rot = .init(&alloc),
+            .rx = alloc.allocOne(),
+            .ry = alloc.allocOne(),
+            .rot = alloc.allocOne(),
         };
     }
 };
 
 const ids = Ids.init();
-
-fn onDrag(ref: f32, drag: *gui.Drag) f32 {
-    return ref + drag.drag_delta_px * 0.001;
-}
 
 fn dragText(buf: []u8, val: f32) ![]const u8 {
     return try std.fmt.bufPrint(buf, "{d:.3}", .{val});
@@ -240,51 +223,6 @@ const DragIds = struct {
             .on_dragged = alloc.allocOne(),
             .total = mark.range(),
         };
-    }
-};
-
-const DragF32 = struct {
-    // We are probably only dragging one widget at a time, so share the
-    // reference between all of them
-    var shared_ref: f32 = 0;
-
-    label: *gui.Label,
-    drag: *gui.Drag,
-    source: *f32,
-
-    fn init(wf: gui.WidgetFactory, source: *f32, comptime drag_ids: DragIds) !DragF32 {
-        var buf: [10]u8 = undefined;
-        const label = try wf.makeLabel(try dragText(&buf, source.*), .{});
-        const drag = try wf.makeDrag(&label.widget, drag_ids.on_start, drag_ids.on_dragged);
-        return .{
-            .label = label,
-            .drag = drag,
-            .source = source,
-        };
-    }
-
-    fn service(self: DragF32, event: usize, comptime drag_ids: DragIds) !bool {
-        switch (event) {
-            drag_ids.on_start => {
-                self.onDragStart();
-                return false;
-            },
-            drag_ids.on_dragged => {
-                try self.onDrag();
-                return true;
-            },
-            else => unreachable,
-        }
-    }
-
-    fn onDragStart(self: DragF32) void {
-        shared_ref = self.source.*;
-    }
-
-    fn onDrag(self: DragF32) !void {
-        var buf: [10]u8 = undefined;
-        self.source.* = shared_ref + self.drag.drag_delta_px * 0.001;
-        try self.label.setText(try dragText(&buf, self.source.*));
     }
 };
 
@@ -324,20 +262,20 @@ pub fn main() !void {
     const rx_label = try wf.makeLabel("rx", .{});
     try controls.append(&rx_label.widget);
 
-    const rx = try DragF32.init(wf, &hit_test_widget.circle.rx, ids.rx);
-    try controls.append(&rx.drag.widget);
+    const rx = try wf.makeDragF32(&hit_test_widget.circle.rx, ids.ry);
+    try controls.append(&rx.widget);
 
     const ry_label = try wf.makeLabel("ry", .{});
     try controls.append(&ry_label.widget);
 
-    const ry = try DragF32.init(wf, &hit_test_widget.circle.ry, ids.ry);
-    try controls.append(&ry.drag.widget);
+    const ry = try wf.makeDragF32(&hit_test_widget.circle.ry, ids.ry);
+    try controls.append(&ry.widget);
 
     const rot_label = try wf.makeLabel("rot", .{});
     try controls.append(&rot_label.widget);
 
-    const rot = try DragF32.init(wf, &hit_test_widget.circle.rotation, ids.rot);
-    try controls.append(&rot.drag.widget);
+    const rot = try wf.makeDragF32(&hit_test_widget.circle.rotation, ids.rot);
+    try controls.append(&rot.widget);
 
     const controls_background = try wf.makeRect(gui.WidgetState.StyleColors.background_color);
     const controls_stack_items = try gui_alloc.heap.arena().dupe(
@@ -379,25 +317,14 @@ pub fn main() !void {
             .height = @intCast(height),
         }, &window.queue);
 
-        var needs_render = false;
         for (gui_state.event_queue.items) |event| switch (event) {
-            ids.rx.total.start...ids.rx.total.end => {
-                needs_render |= try rx.service(event, ids.rx);
-            },
-            ids.ry.total.start...ids.ry.total.end => {
-                needs_render |= try ry.service(event, ids.ry);
-            },
-            ids.rot.total.start...ids.rot.total.end => {
-                needs_render |= try rot.service(event, ids.rot);
+            ids.rx, ids.ry, ids.rot => {
+                hit_test_widget.updateRender();
             },
             else => {},
         };
 
         gui_state.event_queue.clearRetainingCapacity();
-
-        if (needs_render) {
-            hit_test_widget.updateRender();
-        }
 
         window.swapBuffers();
     }

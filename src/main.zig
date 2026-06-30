@@ -131,7 +131,6 @@ fn handlePath(scratch: sphtud.alloc.LinearAllocator, path: SvgReader.Path, rende
 
     var pp = PathParser.init(path.instructions);
 
-
     while (try pp.next()) |item| {
         switch (item) {
             .abs_move => |m| {
@@ -375,6 +374,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var out_ppm_w = sphtud.io.Writer.init(out_ppm_f, &out_ppm_w_buf);
     try sphtud.img.ppm.write(img, &out_ppm_w.interface);
 
+    if (true) return;
     window.swapBuffers();
 
     while (!window.closed()) {
