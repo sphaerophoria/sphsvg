@@ -39,4 +39,16 @@ pub fn build(b: *std.Build) !void {
     hit_test.root_module.addImport("sphtud", sphtud);
 
     b.installArtifact(hit_test);
+
+    const render_debug = b.addExecutable(.{
+        .name = "render_debug",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/render_debug.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    render_debug.root_module.addImport("sphtud", sphtud);
+
+    b.installArtifact(render_debug);
 }

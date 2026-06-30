@@ -54,11 +54,11 @@ pub const Action = union(enum) {
     arc: Arc,
 };
 
-const PixelCross = struct {
+pub const PixelCross = struct {
     x_pos: f32,
     how: How,
 
-    const How = enum {
+    pub const How = enum {
         leave_top,
         enter_top,
         leave_bottom,
@@ -66,17 +66,18 @@ const PixelCross = struct {
     };
 };
 
-const WindingChange = struct {
+pub const WindingChange = struct {
     pos: f32,
     change: i8,
 };
 
 // FIXME: Bad name
-const Sampler = struct {
+pub const Sampler = struct {
     hysterisis_size: f32,
     pixel_height: f32,
     // FIXME: lol buf names
     buf: []PixelCross,
+    num_crosses: usize = 0,
     windings: *std.ArrayList(WindingChange),
     contour: Contour,
 
@@ -110,7 +111,7 @@ const Sampler = struct {
         }
     };
 
-    fn executeScanline(self: *Sampler, y: f32) !void {
+    pub fn executeScanline(self: *Sampler, y: f32) !void {
         var contour_it = self.contour.iter();
 
         const Case = struct {
@@ -136,6 +137,7 @@ const Sampler = struct {
         // another this could fall over
 
         var crosses = std.ArrayList(PixelCross).initBuffer(self.buf);
+        defer self.num_crosses = crosses.items.len;
         while (contour_it.next()) |segment| switch (segment.*) {
             .line => |line| {
                 if (slopePositive(line)) {
