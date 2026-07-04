@@ -2,7 +2,7 @@ const std = @import("std");
 const sphtud = @import("sphtud");
 
 pub fn number(buf: *sphtud.lex.Buf) ?sphtud.lex.Range {
-    wsp(buf);
+    _ = buf.takeWhileAny(ws_chars ++ ",");
     var tmp = buf.tmp();
 
     _ = sign(&tmp);
@@ -44,7 +44,7 @@ pub fn sign(buf: *sphtud.lex.Buf) ?sphtud.lex.Idx {
 }
 
 // https://www.w3.org/TR/SVG2/single-page.html#paths-PathDataBNF
-const ws_chars: []const u8 = &.{ 0x9, 0x20, 0xA, 0xC, 0xD };
+pub const ws_chars: []const u8 = &.{ 0x9, 0x20, 0xA, 0xC, 0xD };
 pub fn wsp(buf: *sphtud.lex.Buf) void {
     _ = buf.takeWhileAny(ws_chars);
 }

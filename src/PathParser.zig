@@ -48,6 +48,7 @@ pub fn init(data: []const u8) PathParser {
 pub fn next(self: *PathParser) !?Item {
     if (self.buf.empty()) return null;
 
+    parse.wsp(&self.buf);
     if (self.buf.takeOne(command_chars)) |idx| {
         switch (idx.data(self.buf)) {
             'M' => self.state = .abs_move,
@@ -109,7 +110,7 @@ pub fn next(self: *PathParser) !?Item {
 }
 
 fn flag(buf: *sphtud.lex.Buf) !bool {
-    parse.wsp(buf);
+    _ = buf.takeWhileAny(parse.ws_chars ++ ",");
     const idx = buf.takeOne("01") orelse return error.Invalid;
     switch (idx.data(buf.*)) {
         '0' => return false,

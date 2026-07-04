@@ -30,6 +30,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var args = init.args.iterate();
 
     _ = args.next();
+    const filename = args.next() orelse return error.NoFile;
     const width_s = args.next() orelse return error.NoWidth;
     const height_s = args.next() orelse return error.NoHeight;
 
@@ -39,7 +40,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var allocators: sphtud.render.AppAllocators = undefined;
     try allocators.initPinned(1 * 1024 * 1024);
 
-    const svg_f = try sphtud.io.open("blender.svg", .{}, 0);
+    const svg_f = try sphtud.io.open(filename, .{}, 0);
     defer sphtud.io.close(svg_f);
 
     // Needs to be large enough to hold the largest attribute

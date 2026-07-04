@@ -200,8 +200,23 @@ pub const WindingChangeCalculator = struct {
                     }) catch unreachable;
                 }
             },
-            .quad_bezier => {
-                unreachable;
+            .quad_bezier => |qb| {
+                const ts = quadBezierTForY(qb, case.y) orelse continue;
+                for (ts) |t| {
+                    if (t < 0 or t > 1) continue;
+
+                    const dir = quadBezierDirAtT(qb, t);
+                    if (@abs(dir[1]) < 1e-6) continue;
+                    const slope_positive = dir[1] > 0;
+
+                    events.appendBounded(.{
+                        .t = t,
+                        .cross = .{
+                            .x_pos = quadBezierXAtT(qb, t),
+                            .how = case.how_map[@intFromBool(slope_positive)],
+                        },
+                    }) catch unreachable;
+                }
             },
             .cubic_bezier => |c| {
                 const ts = cubicBezierTForY(c, case.y);
@@ -227,6 +242,7 @@ pub const WindingChangeCalculator = struct {
                     if (!angleOnArc(arc, theta)) continue;
 
                     const dir = arcDirAtTheta(arc, theta);
+                    if (@abs(dir[1]) < 1e-6) continue;
                     const slope_positive = dir[1] > 0;
 
                     const offs = if (arc.delta_theta >= 0)
@@ -398,6 +414,31 @@ pub const WindingChangeCalculator = struct {
         const e = std.math.lerp(b, c, t);
 
         return std.math.lerp(d, e, t);
+    }
+
+    fn quadBezierTForY(qb: QuadBezier, y: f32) ?[2]f32 {
+        // collect (1-t)^2a + 2(1-t)t*b + t^2c, t
+        // (a-2b+c)t^2 + (2b-2a)t + a
+        return sphtud.math.solveQuadratic(
+            f32,
+            qb.start[1] - 2 * qb.c[1] + qb.end[1],
+            2 * (qb.c[1] - qb.start[1]),
+            qb.start[1] - y,
+        );
+    }
+
+    fn quadBezierDirAtT(qb: QuadBezier, t: f32) sphtud.math.Vec2 {
+        // https://en.wikipedia.org/wiki/B%C3%A9zier_curve#Quadratic_B%C3%A9zier_curves
+        const inv_t: sphtud.math.Vec2 = @splat(1 - t);
+        const t_v: sphtud.math.Vec2 = @splat(t);
+        return sphtud.math.Vec2{ 2, 2 } * inv_t * (qb.c - qb.start) + sphtud.math.Vec2{ 2, 2 } * t_v * (qb.end - qb.c);
+    }
+
+    fn quadBezierXAtT(bez: QuadBezier, t: f32) f32 {
+        const a = std.math.lerp(bez.start[0], bez.c[0], t);
+        const b = std.math.lerp(bez.c[0], bez.end[0], t);
+
+        return std.math.lerp(a, b, t);
     }
 
     fn ellipseAnglesForY(arc: Arc, y: f32) ?[2]f32 {
@@ -580,8 +621,22 @@ pub const PathLineIter = struct {
                             .b = p,
                         };
                     },
-                    .quad_bezier => {
-                        unreachable;
+                    .quad_bezier => |bezier| {
+                        defer self.t_idx += 1;
+
+                        if (self.t_idx == 0) {
+                            self.last = bezier.start;
+                        }
+
+                        const t: f32 = 1.0 / @as(f32, line_segments) * @as(f32, @floatFromInt(self.t_idx + 1));
+
+                        const p = sampleQuadBezier(bezier, t);
+
+                        defer self.last = p;
+                        return .{
+                            .a = self.last,
+                            .b = p,
+                        };
                     },
                     .arc => |arc| {
                         defer self.t_idx += 1;
@@ -627,6 +682,14 @@ pub const PathLineIter = struct {
         const e = std.math.lerp(b, c, t_v);
 
         return std.math.lerp(d, e, t_v);
+    }
+
+    fn sampleQuadBezier(bezier: QuadBezier, t: f32) Point {
+        const t_v = sphtud.math.Vec2{ t, t };
+        const a = std.math.lerp(bezier.start, bezier.c, t_v);
+        const b = std.math.lerp(bezier.c, bezier.end, t_v);
+
+        return std.math.lerp(a, b, t_v);
     }
 };
 

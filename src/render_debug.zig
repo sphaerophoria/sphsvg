@@ -746,7 +746,11 @@ const Gui = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
+    var args = init.args.iterate();
+    _ = args.next();
+    const filename = args.next() orelse return error.NoFile;
+
     var allocators: sphtud.render.AppAllocators = undefined;
     try allocators.initPinned(10 * 1024 * 1024);
 
@@ -762,7 +766,7 @@ pub fn main() !void {
     const view_box, const paths = blk: {
         var paths = std.ArrayList(ColoredPath).empty;
 
-        const f = try sphtud.io.open("blender.svg", .{}, 0);
+        const f = try sphtud.io.open(filename, .{}, 0);
         defer sphtud.io.close(f);
 
         var buf: [4096]u8 = undefined;
