@@ -186,70 +186,64 @@ pub const WindingChangeCalculator = struct {
             .{ .y = y + pixel_height, .how_map = .{ .enter_bottom, .leave_bottom } },
         };
 
-        switch (segment) {
+        for (cases) |case| switch (segment) {
             .line => |line| {
-                for (cases) |case| {
-                    if (lineXForY(line, case.y)) |res| {
-                        const x, const t = res;
-                        const slope_positive = slopePositive(line);
-                        events.appendBounded(.{
-                            .t = t,
-                            .cross = .{
-                                .x_pos = x,
-                                .how = case.how_map[@intFromBool(slope_positive)],
-                            },
-                        }) catch unreachable;
-                    }
+                if (lineXForY(line, case.y)) |res| {
+                    const x, const t = res;
+                    const slope_positive = slopePositive(line);
+                    events.appendBounded(.{
+                        .t = t,
+                        .cross = .{
+                            .x_pos = x,
+                            .how = case.how_map[@intFromBool(slope_positive)],
+                        },
+                    }) catch unreachable;
                 }
             },
             .quad_bezier => {
                 unreachable;
             },
             .cubic_bezier => |c| {
-                for (cases) |case| {
-                    const ts = cubicBezierTForY(c, case.y);
-                    for (ts.buf[0..ts.len]) |t| {
-                        if (t < 0 or t > 1) continue;
+                const ts = cubicBezierTForY(c, case.y);
+                for (ts.buf[0..ts.len]) |t| {
+                    if (t < 0 or t > 1) continue;
 
-                        const dir = cubicBezierDirAtT(c, t);
-                        if (@abs(dir[1]) < 1e-6) continue;
-                        const slope_positive = dir[1] > 0;
+                    const dir = cubicBezierDirAtT(c, t);
+                    if (@abs(dir[1]) < 1e-6) continue;
+                    const slope_positive = dir[1] > 0;
 
-                        events.appendBounded(.{
-                            .t = t,
-                            .cross = .{
-                                .x_pos = cubicBezierXAtT(c, t),
-                                .how = case.how_map[@intFromBool(slope_positive)],
-                            },
-                        }) catch unreachable;
-                    }
+                    events.appendBounded(.{
+                        .t = t,
+                        .cross = .{
+                            .x_pos = cubicBezierXAtT(c, t),
+                            .how = case.how_map[@intFromBool(slope_positive)],
+                        },
+                    }) catch unreachable;
                 }
             },
             .arc => |arc| {
-                for (cases) |case| {
-                    const angles = ellipseAnglesForY(arc, case.y) orelse continue;
-                    for (angles) |theta| {
-                        if (!angleOnArc(arc, theta)) continue;
+                const angles = ellipseAnglesForY(arc, case.y) orelse continue;
+                for (angles) |theta| {
+                    if (!angleOnArc(arc, theta)) continue;
 
-                        const dir = arcDirAtTheta(arc, theta);
-                        const slope_positive = dir[1] > 0;
+                    const dir = arcDirAtTheta(arc, theta);
+                    const slope_positive = dir[1] > 0;
 
-                        const offs = if (arc.delta_theta >= 0)
-                            theta - arc.start_theta
-                        else
-                            arc.start_theta - theta;
+                    const offs = if (arc.delta_theta >= 0)
+                        theta - arc.start_theta
+                    else
+                        arc.start_theta - theta;
 
-                        events.appendBounded(.{
-                            .t = @mod(offs, std.math.tau),
-                            .cross = .{
-                                .x_pos = arcXAtTheta(arc, theta),
-                                .how = case.how_map[@intFromBool(slope_positive)],
-                            },
-                        }) catch unreachable;
-                    }
+                    events.appendBounded(.{
+                        .t = @mod(offs, std.math.tau),
+                        .cross = .{
+                            .x_pos = arcXAtTheta(arc, theta),
+                            .how = case.how_map[@intFromBool(slope_positive)],
+                        },
+                    }) catch unreachable;
                 }
             },
-        }
+        };
 
         return events.items;
     }
