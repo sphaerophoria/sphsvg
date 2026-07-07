@@ -778,6 +778,59 @@ const compute_shader_src =
     \\}
 ;
 
+const ContourComputeBuffers = struct {
+    f32_storage: []f32,
+    items: []Item,
+    out_len: u32,
+
+    // max params Arc == 7
+
+    pub fn init(alloc: std.mem.Allocator, contour: Renderer.Contour) !ContourComputeBuffers {
+        // Max floats per item is 8 by cubic bezier
+        var f32_storage = try std.ArrayList(f32).initCapacity(alloc, 8 * contour.len);
+        var items = try std.ArrayList(Item).initCapacity(alloc, contour.len);
+
+        var out_idx: u32 = 0;
+
+        var it = contour.iter();
+        while (it.next()) |segment| switch (segment.*) {
+            .line => |l| {
+                items.appendBounded(.{
+                    .arg_start_offs = @intCast(f32_storage.items.len),
+                    .typ = 0,
+                    .out_idx = out_idx,
+                }) catch unreachable;
+                f32_storage.appendBounded(l.a[0]) catch unreachable;
+                f32_storage.appendBounded(l.a[1]) catch unreachable;
+                f32_storage.appendBounded(l.b[0]) catch unreachable;
+                f32_storage.appendBounded(l.b[1]) catch unreachable;
+                out_idx += 1;
+            },
+            else => {},
+        };
+
+        return .{
+            .f32_storage = f32_storage.items,
+            .items = items.items,
+            .out_len = out_idx,
+        };
+    }
+
+    // FIXME: Arguably this should pack the same no matter what architecture
+    // we're on
+    const Item = extern struct {
+        arg_start_offs: u32,
+        typ: u32,
+        out_idx: u32,
+    };
+
+    comptime {
+        std.debug.assert(@offsetOf(Item, "arg_start_offs") == 0);
+        std.debug.assert(@offsetOf(Item, "typ") == 4);
+        std.debug.assert(@offsetOf(Item, "out_idx") == 8);
+    }
+};
+
 pub fn main(init: std.process.Init.Minimal) !void {
     var args = init.args.iterate();
     _ = args.next();
@@ -855,11 +908,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 
     const generated_circle = blk: {
-        const buf = try allocators.root_gl.createBuffer();
-        // FIXME: Surely we should be using the named versions of these right?
-        gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, buf);
-        gl.glBufferData(gl.GL_SHADER_STORAGE_BUFFER, 20 * 4 * 4, null, gl.GL_DYNAMIC_DRAW);
-
 
         const compute_shader = gl.glCreateShader(gl.GL_COMPUTE_SHADER);
         defer gl.glDeleteShader(compute_shader);
@@ -876,31 +924,76 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return error.CompilationFailed;
 
 
+        // Once per contour
+        const contour = paths.items[2].path.get(1);
+        const f32_storage, const items, const out_len = blk2: {
+            const cp = allocators.scratch.checkpoint();
+            defer allocators.scratch.restore(cp);
+
+            const compute_buffers = try ContourComputeBuffers.init(allocators.scratch.allocator(), contour);
+
+            break :blk2 .{
+                try sphtud.render.shader_program.Buffer(f32).init(&allocators.root_gl, compute_buffers.f32_storage),
+                try sphtud.render.shader_program.Buffer(ContourComputeBuffers.Item).init(&allocators.root_gl, compute_buffers.items),
+                compute_buffers.out_len,
+            };
+        };
+
         const program = try allocators.root_gl.createProgram();
         gl.glAttachShader(program, compute_shader);
         gl.glLinkProgram(program);
         try sphtud.render.checkProgramLink(program);
 
+        const Output = extern struct {
+            x: f32,
+            // FIXME: Y might be implicit
+            y: f32,
+            positive: u16,
+            valid: u16,
+        };
+
+        const buf = try allocators.root_gl.createBuffer();
+        const num_scanlines = 100;
+        const buf_size_elems = out_len * num_scanlines;
+        const buf_size_bytes = buf_size_elems * @sizeOf(Output);
+        // FIXME: Surely we should be using the named versions of these right?
+        gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, buf);
+        gl.glBufferData(gl.GL_SHADER_STORAGE_BUFFER, buf_size_bytes, null, gl.GL_DYNAMIC_DRAW);
+
         gl.glUseProgram(program);
-        gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 0, buf);
-        gl.glDispatchCompute(20, 1, 1);
+        gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 0, f32_storage.vertex_buffer);
+        gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 1, items.vertex_buffer);
+        gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 2, buf);
+        gl.glUniform1ui(0, out_len);
+
+        gl.glDispatchCompute(@intCast(items.len), num_scanlines, 1);
+        std.debug.print("Num items: {d}\n", .{items.len});
 
         // Idiot says we need this, didn't think about it
         gl.glMemoryBarrier(gl.GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | gl.GL_SHADER_STORAGE_BARRIER_BIT);
+
+        const read_back = try allocators.scratch.allocator().alloc(Output, buf_size_elems);
+        gl.glGetBufferSubData(gl.GL_SHADER_STORAGE_BUFFER, 0, buf_size_bytes, read_back.ptr);
+
+        for (read_back) |val| {
+            if (val.valid == 0) continue;
+            std.debug.print("{any}\n", .{val});
+        }
+        std.debug.print("out len: {d}\n", .{out_len});
 
         const vao = try allocators.root_gl.createArray();
         // 0. copy our vertices array in a buffer for OpenGL to use
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, buf);
         gl.glBindVertexArray(vao);
         // 1. then set the vertex attributes pointers
-        gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, 4 * 4, null);
+        gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Output), null);
         gl.glEnableVertexAttribArray(0);
 
         break :blk sphtud.render.xyt_program.RenderSource {
             .inner = .{
                 .vao = vao,
                 .index_type = null,
-                .len = 20,
+                .len = out_len * num_scanlines,
             },
         };
 
