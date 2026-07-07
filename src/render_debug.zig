@@ -175,6 +175,9 @@ pub const DebugWidget = struct {
     debug_line_points_buf: shader_program.Buffer(Vertex),
     debug_line_points_source: shader_program.RenderSource,
 
+    solid_color_render_program: *sphtud.render.xyt_program.SolidColorProgram,
+    circle_source: sphtud.render.xyt_program.RenderSource,
+
     widget: gui.Widget,
 
     pub fn init(
@@ -232,6 +235,8 @@ pub const DebugWidget = struct {
             .mouse_pos_image_space = .{ 0, 0 },
             .mouse_pos_changed = mouse_pos_changed,
             .event_queue = event_queue,
+            .solid_color_render_program = solid_color_program,
+            .circle_source = undefined,
             .widget = .{
                 .vtable = &.{
                     .render = render,
@@ -276,6 +281,11 @@ pub const DebugWidget = struct {
         self.image_program.renderTexture(self.tex, transform);
 
         gl.glLineWidth(5.0);
+
+        self.solid_color_render_program.renderPoints(self.circle_source, .{
+            .transform = transform.inner,
+            .color = .{1, 1, 1 },
+        });
 
         const uniforms = Uniforms{
             .path_color = colorVec(self.options.colors.path),
@@ -746,6 +756,28 @@ const Gui = struct {
     }
 };
 
+
+const compute_shader_src =
+    \\#version 430 core
+    \\layout (local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+    \\layout(std430, binding = 0) buffer vertOut {
+    \\    vec4 pos[]; // xyz = position, w = 1
+    \\};
+    \\
+    \\const int num_segments = 20;
+    \\const float radius = 0.5;
+    \\void main() {
+    \\    uint i = gl_GlobalInvocationID.x;
+    \\
+    \\    if (i > num_segments) return;
+    \\
+    \\    float t = float(i) / float(num_segments) * 6.28318530718; // 2*pi
+    \\    vec3 p = vec3(cos(t) * radius, sin(t) * radius, 0.0);
+    \\
+    \\    pos[i] = vec4(p, 1.0);
+    \\}
+;
+
 pub fn main(init: std.process.Init.Minimal) !void {
     var args = init.args.iterate();
     _ = args.next();
@@ -762,6 +794,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     gl.glEnable(gl.GL_SCISSOR_TEST);
     gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
     gl.glEnable(gl.GL_BLEND);
+
 
     const view_box, const paths = blk: {
         var paths = std.ArrayList(ColoredPath).empty;
@@ -820,6 +853,65 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
+
+    const generated_circle = blk: {
+        const buf = try allocators.root_gl.createBuffer();
+        // FIXME: Surely we should be using the named versions of these right?
+        gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, buf);
+        gl.glBufferData(gl.GL_SHADER_STORAGE_BUFFER, 20 * 4 * 4, null, gl.GL_DYNAMIC_DRAW);
+
+
+        const compute_shader = gl.glCreateShader(gl.GL_COMPUTE_SHADER);
+        defer gl.glDeleteShader(compute_shader);
+
+        gl.glShaderSource(compute_shader, 1, @ptrCast(&compute_shader_src), null);
+        const shader_binary = @embedFile("shader.spv");
+        gl.glShaderBinary(1, &compute_shader, gl.GL_SHADER_BINARY_FORMAT_SPIR_V_ARB, shader_binary, shader_binary.len);
+        gl.glCompileShader(compute_shader);
+        gl.glSpecializeShader(compute_shader, "main", 0, 0, 0);
+
+        var compiled: c_int = 0;
+        gl.glGetShaderiv(compute_shader, gl.GL_COMPILE_STATUS, &compiled);
+        if (compiled == 0)
+            return error.CompilationFailed;
+
+
+        const program = try allocators.root_gl.createProgram();
+        gl.glAttachShader(program, compute_shader);
+        gl.glLinkProgram(program);
+        try sphtud.render.checkProgramLink(program);
+
+        gl.glUseProgram(program);
+        gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 0, buf);
+        gl.glDispatchCompute(20, 1, 1);
+
+        // Idiot says we need this, didn't think about it
+        gl.glMemoryBarrier(gl.GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | gl.GL_SHADER_STORAGE_BARRIER_BIT);
+
+        const vao = try allocators.root_gl.createArray();
+        // 0. copy our vertices array in a buffer for OpenGL to use
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, buf);
+        gl.glBindVertexArray(vao);
+        // 1. then set the vertex attributes pointers
+        gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, 4 * 4, null);
+        gl.glEnableVertexAttribArray(0);
+
+        break :blk sphtud.render.xyt_program.RenderSource {
+            .inner = .{
+                .vao = vao,
+                .index_type = null,
+                .len = 20,
+            },
+        };
+
+        //var floats: [20 * 4]f32 = undefined;
+        //gl.glGetNamedBufferSubData(buf, 0, 20 * 4 * 4, &floats);
+        //for (0..20) |i| {
+        //    std.debug.print("{any}\n", .{floats[i * 4..][0..4]});
+        //}
+        //
+    };
+
     var renderer = Renderer{
         .tl = .{ view_box.min_x, view_box.min_y },
         .br = .{ view_box.min_x + view_box.width, view_box.min_y + view_box.height },
@@ -860,6 +952,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         @intCast(options.image_height),
         ui.debug_widget.tex,
     );
+
+    ui.debug_widget.circle_source = generated_circle;
 
     while (!window.closed()) {
         allocators.resetScratch();
