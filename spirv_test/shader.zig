@@ -79,8 +79,8 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
                     f32_storage.data[item.arg_offs + 3],
                 },
             };
-            const x, const t, const valid = lineXForY(line, y);
-            if (valid) {
+            if (lineXForY(line, y)) |res| {
+                const x, const t = res;
                 _ = t;
                 const slope_positive = slopePositive(line);
                 output.data[outputs_per_line.* * y_u + item.out_offs]  = .{.x = x, .y = y, .positive = if (slope_positive) 1 else 0, .valid = 1};
@@ -137,12 +137,11 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
 
 }
 
-fn lineXForY(l: Line, y: f32) struct { f32, f32, bool } {
+fn lineXForY(l: Line, y: f32) ?struct { f32, f32 } {
     const min_y = @min(l.a[1], l.b[1]);
     const max_y = @max(l.a[1], l.b[1]);
 
-    const invalid = .{undefined, undefined, false};
-    if (y < min_y or y > max_y) return invalid;
+    if (y < min_y or y > max_y) return null;
 
     const eps = 1e-7;
 
@@ -153,10 +152,10 @@ fn lineXForY(l: Line, y: f32) struct { f32, f32, bool } {
     const div = (l.b[1] - l.a[1]);
     // Relatively horizontal line. This cannot contribute to our winding
     // counts, so we just ignore
-    if (@abs(div) < eps) return invalid;
+    if (@abs(div) < eps) return null;
     const t = (y - l.a[1]) / div;
 
-    return .{ std.math.lerp(l.a[0], l.b[0], t), t, true };
+    return .{ std.math.lerp(l.a[0], l.b[0], t), t};
 }
 
 pub const Line = struct {
@@ -254,15 +253,15 @@ pub fn solveLinear(comptime T: type, a: T, b: T) T {
     return -b / a;
 }
 
-pub fn solveQuadratic(comptime T: type, a: T, b: T, c: T) struct {T, T, bool } {
+pub fn solveQuadratic(comptime T: type, a: T, b: T, c: T) ?[2]T {
     if (a < polynomial_eps) {
         const res = solveLinear(T, b, c);
-        return .{ res, res, true };
+        return .{ res, res };
     }
     const disc = b * b - 4.0 * a * c;
-    if (disc < 0) return .{undefined, undefined, false};
+    if (disc < 0) return null;
     const sd = @sqrt(disc);
-    return .{ (-b + sd) / (2.0 * a), (-b - sd) / (2.0 * a), true};
+    return .{ (-b + sd) / (2.0 * a), (-b - sd) / (2.0 * a)};
 }
 
 pub fn calcCubicDiscriminant(comptime T: type, p: T, q: T) T {
@@ -359,8 +358,7 @@ pub fn solveCubic(comptime T: type, a: T, b: T, c: T, d: T) CubicSolution(T) {
     var ret = CubicSolution(T).empty;
 
     if (@abs(b) > polynomial_eps) {
-        const roots = solveQuadratic(T, b, c, d);
-        if (!roots[2]) return ret;
+        const roots = solveQuadratic(T, b, c, d) orelse return ret;
         ret.a = roots[0];
         ret.b = roots[1];
         ret.len = 2;
