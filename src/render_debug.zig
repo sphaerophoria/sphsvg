@@ -284,7 +284,7 @@ pub const DebugWidget = struct {
 
         self.solid_color_render_program.renderPoints(self.circle_source, .{
             .transform = transform.inner,
-            .color = .{1, 1, 1 },
+            .color = .{ 1, 1, 1 },
         });
 
         const uniforms = Uniforms{
@@ -756,7 +756,6 @@ const Gui = struct {
     }
 };
 
-
 const compute_shader_src =
     \\#version 430 core
     \\layout (local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
@@ -865,7 +864,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
     gl.glEnable(gl.GL_BLEND);
 
-
     const view_box, const paths = blk: {
         var paths = std.ArrayList(ColoredPath).empty;
 
@@ -923,9 +921,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
-
     const generated_circle = blk: {
-
         const compute_shader = gl.glCreateShader(gl.GL_COMPUTE_SHADER);
         defer gl.glDeleteShader(compute_shader);
 
@@ -939,7 +935,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
         gl.glGetShaderiv(compute_shader, gl.GL_COMPILE_STATUS, &compiled);
         if (compiled == 0)
             return error.CompilationFailed;
-
 
         // Once per contour
         const contour = paths.items[2].path.get(1);
@@ -1006,7 +1001,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Output), null);
         gl.glEnableVertexAttribArray(0);
 
-        break :blk sphtud.render.xyt_program.RenderSource {
+        break :blk sphtud.render.xyt_program.RenderSource{
             .inner = .{
                 .vao = vao,
                 .index_type = null,
