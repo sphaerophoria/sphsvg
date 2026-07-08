@@ -806,6 +806,23 @@ const ContourComputeBuffers = struct {
                 f32_storage.appendBounded(l.b[1]) catch unreachable;
                 out_idx += 1;
             },
+            .cubic_bezier => |cb| {
+                items.appendBounded(.{
+                    .arg_start_offs = @intCast(f32_storage.items.len),
+                    .typ = 2,
+                    .out_idx = out_idx,
+                }) catch unreachable;
+                f32_storage.appendBounded(cb.start[0]) catch unreachable;
+                f32_storage.appendBounded(cb.start[1]) catch unreachable;
+                f32_storage.appendBounded(cb.c1[0]) catch unreachable;
+                f32_storage.appendBounded(cb.c1[1]) catch unreachable;
+                f32_storage.appendBounded(cb.c2[0]) catch unreachable;
+                f32_storage.appendBounded(cb.c2[1]) catch unreachable;
+                f32_storage.appendBounded(cb.end[0]) catch unreachable;
+                f32_storage.appendBounded(cb.end[1]) catch unreachable;
+
+                out_idx += 3;
+            },
             else => {},
         };
 

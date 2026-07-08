@@ -1,1 +1,1 @@
-../spirv_test/shader.spv
+../spirv_test/zig-out/bin/shader.spv
