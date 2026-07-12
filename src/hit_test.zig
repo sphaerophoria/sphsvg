@@ -170,15 +170,13 @@ pub const HitTestWidget = struct {
         self.circle_buf.updateBuffer(&circle_points);
         self.circle_source.bindData(self.render_program.handle(), self.circle_buf);
 
-        var intersection_points_buf: [2]Vec2 = undefined;
         const intersection_points = sphtud.geometry.rayEllipseIntersection(
             self.ray,
             self.circle,
-            &intersection_points_buf,
         );
 
         var intersection_points_gpu: [2]sphtud.render.xyt_program.Vertex = undefined;
-        for (intersection_points, 0..) |p, i| {
+        for (intersection_points.buf[0..intersection_points.len], 0..) |p, i| {
             intersection_points_gpu[i] = .{ .vPos = p };
         }
         self.intersections_buf.updateBuffer(intersection_points_gpu[0..intersection_points.len]);

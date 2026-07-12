@@ -3,66 +3,23 @@ const std = @import("std");
 const PathParser = @import("PathParser.zig");
 const xyt = sphtud.render.xyt_program;
 const CoordinateConverter = @import("CoordinateConverter.zig");
+const render_util = @import("render_util.zig");
 
 tl: Point,
 br: Point,
 
 const Renderer = @This();
 
-pub const Contour = sphtud.util.RuntimeSegmentedList(Action);
+pub const Contour = sphtud.util.RuntimeSegmentedList(ContourSegment);
 pub const Path = sphtud.util.RuntimeSegmentedList(Contour);
-pub const Point = sphtud.math.Vec2;
+pub const Point = render_util.Point;
 
-pub const CubicBezier = struct {
-    start: Point,
-    c1: Point,
-    c2: Point,
-    end: Point,
-};
+pub const CubicBezier = render_util.CubicBezier;
+pub const QuadBezier = render_util.QuadBezier;
+pub const Arc = render_util.Arc;
+pub const Line = render_util.Line;
 
-pub const QuadBezier = struct {
-    start: Point,
-    c: Point,
-    end: Point,
-};
-
-pub const Arc = struct {
-    rot: f32,
-    rx: f32,
-    ry: f32,
-    center: Point,
-    start_theta: f32,
-    delta_theta: f32,
-
-    const Applier = struct {
-        transform: sphtud.math.Transform,
-
-        pub fn apply(self: Applier, theta: f32) Point {
-            return self.transform.apply2(.{
-                @cos(theta), @sin(theta),
-            });
-        }
-    };
-
-    pub fn applier(arc: Arc) Applier {
-        return .{
-            .transform = sphtud.math.Transform.scale(arc.rx, arc.ry)
-                .then(.rotate(arc.rot))
-                .then(
-                .translate(arc.center[0], arc.center[1]),
-            ),
-        };
-    }
-};
-
-pub const Line = sphtud.geometry.Line2;
-
-pub const Action = union(enum) {
-    line: Line,
-    cubic_bezier: CubicBezier,
-    quad_bezier: QuadBezier,
-    arc: Arc,
-};
+pub const ContourSegment = render_util.ContourSegment;
 
 pub const PixelCross = struct {
     x_pos: f32,
@@ -153,7 +110,7 @@ pub const WindingChangeCalculator = struct {
         return windings.items;
     }
 
-    fn appendSortedSegmentCrosses(segment: Action, y: f32, pixel_height: f32, crosses: *std.ArrayList(PixelCross)) !void {
+    fn appendSortedSegmentCrosses(segment: ContourSegment, y: f32, pixel_height: f32, crosses: *std.ArrayList(PixelCross)) !void {
         var unsorted_buf: [12]CrossWithT = undefined;
         const events = calcUnsortedSegmentCrosses(segment, y, pixel_height, &unsorted_buf);
 
@@ -173,7 +130,7 @@ pub const WindingChangeCalculator = struct {
         cross: PixelCross,
     };
 
-    fn calcUnsortedSegmentCrosses(segment: Action, y: f32, pixel_height: f32, events_buf: []CrossWithT) []CrossWithT {
+    fn calcUnsortedSegmentCrosses(segment: ContourSegment, y: f32, pixel_height: f32, events_buf: []CrossWithT) []CrossWithT {
         var events = std.ArrayList(CrossWithT).initBuffer(events_buf);
 
         const Case = struct {
@@ -186,80 +143,25 @@ pub const WindingChangeCalculator = struct {
             .{ .y = y + pixel_height, .how_map = .{ .enter_bottom, .leave_bottom } },
         };
 
-        for (cases) |case| switch (segment) {
-            .line => |line| {
-                if (lineXForY(line, case.y)) |res| {
-                    const x, const t = res;
-                    const slope_positive = slopePositive(line);
-                    events.appendBounded(.{
-                        .t = t,
-                        .cross = .{
-                            .x_pos = x,
-                            .how = case.how_map[@intFromBool(slope_positive)],
-                        },
-                    }) catch unreachable;
-                }
-            },
-            .quad_bezier => |qb| {
-                const ts = quadBezierTForY(qb, case.y) orelse continue;
-                for (ts) |t| {
-                    if (t < 0 or t > 1) continue;
+        for (cases) |case| {
+            const crosses = switch (segment) {
+                .line => |line| render_util.lineCrosses(line, case.y),
+                .quad_bezier => |qb| render_util.quadBezierCrosses(qb, case.y),
+                .cubic_bezier => |c| render_util.cubicBezierCrosses(c, case.y),
+                .arc => |arc| render_util.arcCrosses(arc, case.y),
+            };
 
-                    const dir = quadBezierDirAtT(qb, t);
-                    if (@abs(dir[1]) < 1e-6) continue;
-                    const slope_positive = dir[1] > 0;
-
-                    events.appendBounded(.{
-                        .t = t,
-                        .cross = .{
-                            .x_pos = quadBezierXAtT(qb, t),
-                            .how = case.how_map[@intFromBool(slope_positive)],
-                        },
-                    }) catch unreachable;
-                }
-            },
-            .cubic_bezier => |c| {
-                const ts = cubicBezierTForY(c, case.y);
-                for (ts.buf[0..ts.len]) |t| {
-                    if (t < 0 or t > 1) continue;
-
-                    const dir = cubicBezierDirAtT(c, t);
-                    if (@abs(dir[1]) < 1e-6) continue;
-                    const slope_positive = dir[1] > 0;
-
-                    events.appendBounded(.{
-                        .t = t,
-                        .cross = .{
-                            .x_pos = cubicBezierXAtT(c, t),
-                            .how = case.how_map[@intFromBool(slope_positive)],
-                        },
-                    }) catch unreachable;
-                }
-            },
-            .arc => |arc| {
-                const angles = ellipseAnglesForY(arc, case.y) orelse continue;
-                for (angles) |theta| {
-                    if (!angleOnArc(arc, theta)) continue;
-
-                    const dir = arcDirAtTheta(arc, theta);
-                    if (@abs(dir[1]) < 1e-6) continue;
-                    const slope_positive = dir[1] > 0;
-
-                    const offs = if (arc.delta_theta >= 0)
-                        theta - arc.start_theta
-                    else
-                        arc.start_theta - theta;
-
-                    events.appendBounded(.{
-                        .t = @mod(offs, std.math.tau),
-                        .cross = .{
-                            .x_pos = arcXAtTheta(arc, theta),
-                            .how = case.how_map[@intFromBool(slope_positive)],
-                        },
-                    }) catch unreachable;
-                }
-            },
-        };
+            for (0..crosses.len) |i| {
+                const res = crosses.buf[i];
+                events.appendBounded(.{
+                    .t = res.t,
+                    .cross = .{
+                        .x_pos = res.x,
+                        .how = case.how_map[@intFromBool(res.slope_positive)],
+                    },
+                }) catch unreachable;
+            }
+        }
 
         return events.items;
     }
@@ -294,218 +196,6 @@ pub const WindingChangeCalculator = struct {
             return null;
         }
     };
-
-    fn slopePositive(l: Line) bool {
-        const right = sphtud.math.Vec2{ 1, 0 };
-        return sphtud.math.cross2(right, l.dir()) > 0;
-    }
-
-    test "slopePositive" {
-        try std.testing.expectEqual(true, slopePositive(.{ .a = .{ 0, 0 }, .b = .{ 1, 1 } }));
-        try std.testing.expectEqual(false, slopePositive(.{ .a = .{ 0, 0 }, .b = .{ 0, 0 } }));
-        try std.testing.expectEqual(false, slopePositive(.{ .a = .{ 0, 0 }, .b = .{ 1, -1 } }));
-    }
-
-    fn lineXForY(l: Line, y: f32) ?struct { f32, f32 } {
-        var min_y = l.a[1];
-        var max_y = l.b[1];
-
-        if (min_y > max_y) std.mem.swap(f32, &min_y, &max_y);
-        if (y < min_y or y > max_y) return null;
-
-        const eps = 1e-7;
-
-        //y = lerp(start, end, t);
-        //y = l.a[1] + t*(l.b[1] - l.a[1]);
-        //(y - l.a[1]) / (l.b[1] - l.a[1]) = t
-        //x = l.a[0] + t*(l.b[0] - l.a[0]);
-        const div = (l.b[1] - l.a[1]);
-        // Relatively horizontal line. This cannot contribute to our winding
-        // counts, so we just ignore
-        if (@abs(div) < eps) return null;
-        const t = (y - l.a[1]) / div;
-
-        return .{ std.math.lerp(l.a[0], l.b[0], t), t };
-    }
-
-    test "lineXForY" {
-        const res = lineXForY(.{
-            .a = .{ 0, 0 },
-            .b = .{ 10, 10 },
-        }, 5.0) orelse return error.NoPoint;
-        try std.testing.expectApproxEqAbs(5.0, res[0], 0.001);
-    }
-
-    const Cubic = struct {
-        a: f32,
-        b: f32,
-        c: f32,
-        d: f32,
-    };
-
-    fn cubicBezierTForY(cb: CubicBezier, y: f32) sphtud.math.CubicSolution(f32) {
-        // From wolfram alpha "collect (1-t)^3*a + 3*(1-t)^2*t*b + 3*(1-t)*t^2*c + t^3 * d, t"
-        // t^3 (-a + 3b - 3c + d) + t^2 (3a - 6b + 3c) + t (-3a + 3b) + a
-        //
-        // However the above causes some pretty major numerical instability. If
-        // we rewrite as follows we lose a lot less precision (thanks claude)
-        const d01 = cb.c1[1] - cb.start[1];
-        const d12 = cb.c2[1] - cb.c1[1];
-        const d23 = cb.end[1] - cb.c2[1];
-
-        var res = sphtud.math.solveCubic(
-            f32,
-            (d23 - d12) - (d12 - d01),
-            3 * (d12 - d01),
-            3 * d01,
-            cb.start[1] - y,
-        );
-
-        for (res.buf[0..res.len]) |*t| {
-            t.* = refineBezierSolution(cb, y, t.*);
-        }
-
-        return res;
-    }
-
-    fn refineBezierSolution(cb: CubicBezier, y_target: f32, t_init: f32) f32 {
-        // F32 solutions are pretty imprecise, but lucky for us we can just
-        // walk downhill a few times and call it a day
-        var t = t_init;
-        for (0..4) |_| {
-            const dy = cubicBezierDirAtT(cb, t)[1];
-            if (@abs(dy) < 1e-6) break;
-
-            const y = cubicBezierYAtT(cb, t);
-            const step = (y - y_target) / dy;
-            t -= step;
-
-            if (@abs(step) < 1e-7) break;
-        }
-        return t;
-    }
-
-    fn cubicBezierDirAtT(c: CubicBezier, t: f32) sphtud.math.Vec2 {
-        // Derivative from https://en.wikipedia.org/wiki/B%C3%A9zier_curve#Cubic_B%C3%A9zier_curves
-        const inv_t: sphtud.math.Vec2 = @splat(1 - t);
-        const inv_t_2 = inv_t * inv_t;
-        const t_2: sphtud.math.Vec2 = @splat(t * t);
-        const t_v: sphtud.math.Vec2 = @splat(t);
-        return sphtud.math.Vec2{ 3, 3 } * inv_t_2 * (c.c1 - c.start) + sphtud.math.Vec2{ 6, 6 } * inv_t * t_v * (c.c2 - c.c1) + sphtud.math.Vec2{ 3, 3 } * t_2 * (c.end - c.c2);
-    }
-
-    fn cubicBezierXAtT(bez: CubicBezier, t: f32) f32 {
-        const a = std.math.lerp(bez.start[0], bez.c1[0], t);
-        const b = std.math.lerp(bez.c1[0], bez.c2[0], t);
-        const c = std.math.lerp(bez.c2[0], bez.end[0], t);
-
-        const d = std.math.lerp(a, b, t);
-        const e = std.math.lerp(b, c, t);
-
-        return std.math.lerp(d, e, t);
-    }
-
-    fn cubicBezierYAtT(bez: CubicBezier, t: f32) f32 {
-        const a = std.math.lerp(bez.start[1], bez.c1[1], t);
-        const b = std.math.lerp(bez.c1[1], bez.c2[1], t);
-        const c = std.math.lerp(bez.c2[1], bez.end[1], t);
-
-        const d = std.math.lerp(a, b, t);
-        const e = std.math.lerp(b, c, t);
-
-        return std.math.lerp(d, e, t);
-    }
-
-    fn quadBezierTForY(qb: QuadBezier, y: f32) ?[2]f32 {
-        // collect (1-t)^2a + 2(1-t)t*b + t^2c, t
-        // (a-2b+c)t^2 + (2b-2a)t + a
-        return sphtud.math.solveQuadratic(
-            f32,
-            qb.start[1] - 2 * qb.c[1] + qb.end[1],
-            2 * (qb.c[1] - qb.start[1]),
-            qb.start[1] - y,
-        );
-    }
-
-    fn quadBezierDirAtT(qb: QuadBezier, t: f32) sphtud.math.Vec2 {
-        // https://en.wikipedia.org/wiki/B%C3%A9zier_curve#Quadratic_B%C3%A9zier_curves
-        const inv_t: sphtud.math.Vec2 = @splat(1 - t);
-        const t_v: sphtud.math.Vec2 = @splat(t);
-        return sphtud.math.Vec2{ 2, 2 } * inv_t * (qb.c - qb.start) + sphtud.math.Vec2{ 2, 2 } * t_v * (qb.end - qb.c);
-    }
-
-    fn quadBezierXAtT(bez: QuadBezier, t: f32) f32 {
-        const a = std.math.lerp(bez.start[0], bez.c[0], t);
-        const b = std.math.lerp(bez.c[0], bez.end[0], t);
-
-        return std.math.lerp(a, b, t);
-    }
-
-    fn ellipseAnglesForY(arc: Arc, y: f32) ?[2]f32 {
-        const ellipse = sphtud.geometry.Ellipse{
-            .center = arc.center,
-            .rx = arc.rx,
-            .ry = arc.ry,
-            .rotation = arc.rot,
-        };
-
-        // Start the ray far enough left that both intersections sit ahead of
-        // it; the rotated ellipse fits inside a circle of radius max(rx, ry).
-        const max_r = @max(arc.rx, arc.ry);
-        const ray = sphtud.geometry.Ray2{
-            .start = .{ arc.center[0] - 2 * max_r - 1, y },
-            .dir = .{ 1, 0 },
-        };
-
-        var ret_buf: [2]sphtud.math.Vec2 = undefined;
-        const points = sphtud.geometry.rayEllipseIntersection(ray, ellipse, &ret_buf);
-        if (points.len < 2) return null;
-
-        // ellipseToCircle maps an ellipse point to (cos θ, sin θ) on the unit circle.
-        const to_circle = sphtud.geometry.ellipseToCircle(ellipse);
-        const p1 = to_circle.apply2(points[0]);
-        const p2 = to_circle.apply2(points[1]);
-        return .{
-            std.math.atan2(p1[1], p1[0]),
-            std.math.atan2(p2[1], p2[0]),
-        };
-    }
-
-    fn angleOnArc(arc: Arc, theta: f32) bool {
-        const tau = std.math.tau;
-        // Pick the representative of (theta - start_theta) in [0, 2π).
-        var d = @mod(theta - arc.start_theta, tau);
-        if (arc.delta_theta >= 0) {
-            return d <= arc.delta_theta;
-        }
-        // For a negative sweep we want d in (-2π, 0].
-        if (d > 0) d -= tau;
-        return d >= arc.delta_theta;
-    }
-
-    fn arcXAtTheta(arc: Arc, theta: f32) f32 {
-        // P(θ) = R(rot) · (rx cos θ, ry sin θ) + center; only the x is needed.
-        const x_local = arc.rx * @cos(theta);
-        const y_local = arc.ry * @sin(theta);
-        return @cos(arc.rot) * x_local - @sin(arc.rot) * y_local + arc.center[0];
-    }
-
-    fn arcDirAtTheta(arc: Arc, theta: f32) sphtud.math.Vec2 {
-        const ellipse = sphtud.geometry.Ellipse{
-            .center = arc.center,
-            .rx = arc.rx,
-            .ry = arc.ry,
-            .rotation = arc.rot,
-        };
-        // Tangent on the unit circle at θ is (-sin θ, cos θ) — radius rotated 90°.
-        // Homogeneous coord 0 strips out translation so ellipseFromCircle only
-        // applies the scale+rotate stretch to the direction vector.
-        const from_circle = sphtud.geometry.ellipseFromCircle(ellipse);
-        const tangent = from_circle.apply(.{ -@sin(theta), @cos(theta), 0 });
-        var dir = sphtud.math.Vec2{ tangent[0], tangent[1] };
-        if (arc.delta_theta < 0) dir = -dir;
-        return dir;
-    }
 };
 
 pub fn renderPathToImage(self: *Renderer, path: Path, color: sphtud.math.Vec3, out: sphtud.img.Image) !void {
@@ -580,7 +270,7 @@ fn asf32(val: anytype) f32 {
 pub const PathLineIter = struct {
     contours: Path.Iter,
     segments: ?Contour.Iter,
-    current_segment: Action,
+    current_segment: ContourSegment,
     t_idx: usize,
     last: sphtud.math.Vec2,
 

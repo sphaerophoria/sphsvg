@@ -796,6 +796,7 @@ const ContourComputeBuffers = struct {
             .line => |l| {
                 items.appendBounded(.{
                     .arg_start_offs = @intCast(f32_storage.items.len),
+                    // FIXME: Shared constants somewhere?
                     .typ = 0,
                     .out_idx = out_idx,
                 }) catch unreachable;
@@ -803,11 +804,29 @@ const ContourComputeBuffers = struct {
                 f32_storage.appendBounded(l.a[1]) catch unreachable;
                 f32_storage.appendBounded(l.b[0]) catch unreachable;
                 f32_storage.appendBounded(l.b[1]) catch unreachable;
+                // FIXME: Shared constants somewhere?
                 out_idx += 1;
+            },
+            .quad_bezier => |qb| {
+                items.appendBounded(.{
+                    .arg_start_offs = @intCast(f32_storage.items.len),
+                    .typ = 1,
+                    .out_idx = out_idx,
+                }) catch unreachable;
+                f32_storage.appendBounded(qb.start[0]) catch unreachable;
+                f32_storage.appendBounded(qb.start[1]) catch unreachable;
+                f32_storage.appendBounded(qb.c[0]) catch unreachable;
+                f32_storage.appendBounded(qb.c[1]) catch unreachable;
+                f32_storage.appendBounded(qb.end[0]) catch unreachable;
+                f32_storage.appendBounded(qb.end[1]) catch unreachable;
+
+                // FIXME: Shared constants somewhere?
+                out_idx += 2;
             },
             .cubic_bezier => |cb| {
                 items.appendBounded(.{
                     .arg_start_offs = @intCast(f32_storage.items.len),
+                    // FIXME: Shared constants somewhere?
                     .typ = 2,
                     .out_idx = out_idx,
                 }) catch unreachable;
@@ -820,9 +839,27 @@ const ContourComputeBuffers = struct {
                 f32_storage.appendBounded(cb.end[0]) catch unreachable;
                 f32_storage.appendBounded(cb.end[1]) catch unreachable;
 
+                // FIXME: Shared constants somewhere?
                 out_idx += 3;
             },
-            else => {},
+            .arc => |arc| {
+                items.appendBounded(.{
+                    .arg_start_offs = @intCast(f32_storage.items.len),
+                    // FIXME: Shared constants somewhere?
+                    .typ = 3,
+                    .out_idx = out_idx,
+                }) catch unreachable;
+                f32_storage.appendBounded(arc.rot) catch unreachable;
+                f32_storage.appendBounded(arc.rx) catch unreachable;
+                f32_storage.appendBounded(arc.ry) catch unreachable;
+                f32_storage.appendBounded(arc.center[0]) catch unreachable;
+                f32_storage.appendBounded(arc.center[1]) catch unreachable;
+                f32_storage.appendBounded(arc.start_theta) catch unreachable;
+                f32_storage.appendBounded(arc.delta_theta) catch unreachable;
+
+                // FIXME: Shared constants somewhere?
+                out_idx += 2;
+            },
         };
 
         return .{
