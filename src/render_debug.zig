@@ -997,6 +997,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             x: f32,
             // FIXME: Y might be implicit
             y: f32,
+            in_typ: u32,
             positive: u16,
             valid: u16,
         };
@@ -1026,6 +1027,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         for (read_back) |val| {
             if (val.valid == 0) continue;
+            if (val.in_typ != 3) continue;
             std.debug.print("{any}\n", .{val});
         }
         std.debug.print("out len: {d}\n", .{out_len});
@@ -1068,8 +1070,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .winding_down = .{ .r = 1, .g = 0, .b = 0, .a = 1 },
         },
         .image_width = 200,
-        .image_height = 274,
-        .highlighted_line = 204,
+        .image_height = 200,
+        .highlighted_line = -1,
         .path_mask = try std.DynamicBitSet.initFull(allocators.root.arena(), paths.items.len),
         .show_outlines = false,
     };

@@ -1,4 +1,6 @@
 const std = @import("std");
+const math = std.math;
+const mem = std.mem;
 const sphtud = @import("sphtud");
 
 pub const Point = sphtud.math.Vec2;
@@ -261,27 +263,26 @@ fn cubicBezierYAtT(bez: CubicBezier, t: f32) f32 {
 }
 
 pub fn arcCrosses(arc: Arc, y: f32 ) CrossSolutionArray {
-    const ret = CrossSolutionArray.init;
+    var ret = CrossSolutionArray.init;
 
     const angles = ellipseAnglesForY(arc, y) orelse return ret;
-    _ = angles;
-    //for (angles) |theta| {
-    //    if (!angleOnArc(arc, theta)) continue;
+    for (angles) |theta| {
+        if (!angleOnArc(arc, theta)) continue;
 
-    //    const dir = arcDirAtTheta(arc, theta);
-    //    if (@abs(dir[1]) < 1e-6) continue;
+        const dir = arcDirAtTheta(arc, theta);
+        if (@abs(dir[1]) < 1e-6) continue;
 
-    //    const offs = if (arc.delta_theta >= 0)
-    //        theta - arc.start_theta
-    //    else
-    //        arc.start_theta - theta;
+        const offs = if (arc.delta_theta >= 0)
+            theta - arc.start_theta
+        else
+            arc.start_theta - theta;
 
-    //    ret.append(.{
-    //        .t = @mod(offs, std.math.tau),
-    //        .x = arcXAtTheta(arc, theta),
-    //        .slope_positive = dir[1] > 0,
-    //    });
-    //}
+        ret.append(.{
+            .t = @mod(offs, std.math.tau),
+            .x = arcXAtTheta(arc, theta),
+            .slope_positive = dir[1] > 0,
+        });
+    }
 
     return ret;
 }

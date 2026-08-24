@@ -12,6 +12,7 @@ const Output = extern struct {
     x: f32,
     // FIXME: Y might be implicit
     y: f32,
+    in_typ: u32,
     positive: u16,
     valid: u16,
 };
@@ -64,6 +65,10 @@ const outputs_per_line = @extern(*addrspace(.uniform) u32, .{
     .name = "outputs_per_line",
     .decoration = .{ .descriptor = .{ .set = 0, .binding = 0 } },
 });
+
+const math = std.math;
+const mem = std.mem;
+
 
 export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
     const val = std.spirv.global_invocation_id[0];
@@ -131,19 +136,20 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
             break :blk .{ render_util.cubicBezierCrosses(c, y), 3 };
         },
         3 => {
-            const arc = Arc {
-                .rot = f32_storage.data[item.arg_offs + 0],
-                .rx = f32_storage.data[item.arg_offs + 1],
-                .ry = f32_storage.data[item.arg_offs + 2],
-                .center = .{
-                    f32_storage.data[item.arg_offs + 3],
-                    f32_storage.data[item.arg_offs + 4],
-                },
-                .start_theta = f32_storage.data[item.arg_offs + 5],
-                .delta_theta = f32_storage.data[item.arg_offs + 6],
-            };
+            //const arc = Arc {
+            //    .rot = f32_storage.data[item.arg_offs + 0],
+            //    .rx = f32_storage.data[item.arg_offs + 1],
+            //    .ry = f32_storage.data[item.arg_offs + 2],
+            //    .center = .{
+            //        f32_storage.data[item.arg_offs + 3],
+            //        f32_storage.data[item.arg_offs + 4],
+            //    },
+            //    .start_theta = f32_storage.data[item.arg_offs + 5],
+            //    .delta_theta = f32_storage.data[item.arg_offs + 6],
+            //};
 
-            break :blk .{ render_util.arcCrosses(arc, y), 2 };
+            //break :blk .{ render_util.arcCrosses(arc, y), 2 };
+            break :blk .{ render_util.CrossSolutionArray.init, 2 };
         },
         else => {
             break :blk .{ render_util.CrossSolutionArray.init, 0 };
@@ -155,6 +161,7 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
         output.data[outputs_per_line.* * y_u + item.out_offs + i] = .{
             .x = cross.x,
             .y = y,
+            .in_typ = item.arg_type,
             .positive = @intFromBool(cross.slope_positive),
             .valid = 1,
         };
@@ -165,50 +172,5 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
 
     // FIXME: Sort solutions by t
 
-}
-
-fn cubicBezierTForY(cb: CubicBezier, y: f32) sphtud.math.CubicSolution(f32) {
-    // From wolfram alpha "collect (1-t)^3*a + 3*(1-t)^2*t*b + 3*(1-t)*t^2*c + t^3 * d, t"
-    // t^3 (-a + 3b - 3c + d) + t^2 (3a - 6b + 3c) + t (-3a + 3b) + a
-    //
-    // However the above causes some pretty major numerical instability. If
-    // we rewrite as follows we lose a lot less precision (thanks claude)
-    const d01 = cb.c1[1] - cb.start[1];
-    const d12 = cb.c2[1] - cb.c1[1];
-    const d23 = cb.end[1] - cb.c2[1];
-
-    const res = sphtud.math.solveCubic(
-        f32,
-        (d23 - d12) - (d12 - d01),
-        3 * (d12 - d01),
-        3 * d01,
-        cb.start[1] - y,
-    );
-
-    //for (res.buf[0..res.len]) |*t| {
-    //    t.* = refineBezierSolution(cb, y, t.*);
-    //}
-
-    return res;
-}
-
-fn cubicBezierDirAtT(c: CubicBezier, t: f32) Vec2 {
-    // Derivative from https://en.wikipedia.org/wiki/B%C3%A9zier_curve#Cubic_B%C3%A9zier_curves
-    const inv_t: Vec2 = @splat(1 - t);
-    const inv_t_2 = inv_t * inv_t;
-    const t_2: Vec2 = @splat(t * t);
-    const t_v: Vec2 = @splat(t);
-    return Vec2{ 3, 3 } * inv_t_2 * (c.c1 - c.start) + Vec2{ 6, 6 } * inv_t * t_v * (c.c2 - c.c1) + Vec2{ 3, 3 } * t_2 * (c.end - c.c2);
-}
-
-fn cubicBezierXAtT(bez: CubicBezier, t: f32) f32 {
-    const a = std.math.lerp(bez.start[0], bez.c1[0], t);
-    const b = std.math.lerp(bez.c1[0], bez.c2[0], t);
-    const c = std.math.lerp(bez.c2[0], bez.end[0], t);
-
-    const d = std.math.lerp(a, b, t);
-    const e = std.math.lerp(b, c, t);
-
-    return std.math.lerp(d, e, t);
 }
 
