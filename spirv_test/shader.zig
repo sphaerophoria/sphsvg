@@ -69,12 +69,24 @@ const outputs_per_line = @extern(*addrspace(.uniform) u32, .{
 const math = std.math;
 const mem = std.mem;
 
+//fn atan2(x: f32, y: f32) f32 {
+//    return asm volatile (
+//        \\%inst_set = OpExtInstImport "GLSL.std.450"
+//        \\%ret = OpExtInst %Result %inst_set 25 %y %x
+//        : [ret] "" (-> f32),
+//        : [Result] "t" (f32),
+//          [x] "" (x),
+//          [y] "" (y),
+//    );
+//}
+var x: u32 = 4;
 
 export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
     const val = std.spirv.global_invocation_id[0];
     const y_u = std.spirv.global_invocation_id[1];
     const y: f32 = @floatFromInt(y_u);
 
+    _ = @atomicRmw(u32, &x, .Add, 1, .acquire);
     // FIXME: Set upper bound
     //if (val > num_segments) return;
 
@@ -136,20 +148,19 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
             break :blk .{ render_util.cubicBezierCrosses(c, y), 3 };
         },
         3 => {
-            //const arc = Arc {
-            //    .rot = f32_storage.data[item.arg_offs + 0],
-            //    .rx = f32_storage.data[item.arg_offs + 1],
-            //    .ry = f32_storage.data[item.arg_offs + 2],
-            //    .center = .{
-            //        f32_storage.data[item.arg_offs + 3],
-            //        f32_storage.data[item.arg_offs + 4],
-            //    },
-            //    .start_theta = f32_storage.data[item.arg_offs + 5],
-            //    .delta_theta = f32_storage.data[item.arg_offs + 6],
-            //};
+            const arc = Arc {
+                .rot = f32_storage.data[item.arg_offs + 0],
+                .rx = f32_storage.data[item.arg_offs + 1],
+                .ry = f32_storage.data[item.arg_offs + 2],
+                .center = .{
+                    f32_storage.data[item.arg_offs + 3],
+                    f32_storage.data[item.arg_offs + 4],
+                },
+                .start_theta = f32_storage.data[item.arg_offs + 5],
+                .delta_theta = f32_storage.data[item.arg_offs + 6],
+            };
 
-            //break :blk .{ render_util.arcCrosses(arc, y), 2 };
-            break :blk .{ render_util.CrossSolutionArray.init, 2 };
+            break :blk .{ render_util.arcCrosses(arc, y), 2 };
         },
         else => {
             break :blk .{ render_util.CrossSolutionArray.init, 0 };

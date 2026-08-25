@@ -2,6 +2,7 @@ const std = @import("std");
 const math = std.math;
 const mem = std.mem;
 const sphtud = @import("sphtud");
+const builtin = @import("builtin");
 
 pub const Point = sphtud.math.Vec2;
 pub const Line = sphtud.geometry.Line2;
@@ -262,6 +263,21 @@ fn cubicBezierYAtT(bez: CubicBezier, t: f32) f32 {
     return std.math.lerp(d, e, t);
 }
 
+fn atan2(y: f32, x: f32) f32 {
+    if (builtin.target.os.tag == .opengl) {
+        return asm volatile (
+            \\%inst_set = OpExtInstImport "GLSL.std.450"
+            \\%ret = OpExtInst %Result %inst_set 25 %y %x
+            : [ret] "" (-> f32),
+            : [Result] "t" (f32),
+              [x] "" (x),
+              [y] "" (y),
+        );
+    } else {
+        return std.math.atan2(y, x);
+    }
+}
+
 pub fn arcCrosses(arc: Arc, y: f32 ) CrossSolutionArray {
     var ret = CrossSolutionArray.init;
 
@@ -311,8 +327,8 @@ fn ellipseAnglesForY(arc: Arc, y: f32) ?[2]f32 {
     const p1 = to_circle.apply2(points.buf[0]);
     const p2 = to_circle.apply2(points.buf[1]);
     return .{
-        std.math.atan2(p1[1], p1[0]),
-        std.math.atan2(p2[1], p2[0]),
+        atan2(p1[1], p1[0]),
+        atan2(p2[1], p2[0]),
     };
 }
 
