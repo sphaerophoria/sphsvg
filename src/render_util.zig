@@ -367,3 +367,64 @@ fn arcDirAtTheta(arc: Arc, theta: f32) sphtud.math.Vec2 {
     if (arc.delta_theta < 0) dir = -dir;
     return dir;
 }
+
+pub const PixelCross = struct {
+    x_pos: f32,
+    how: How,
+
+    pub const How = enum {
+        leave_top,
+        enter_top,
+        leave_bottom,
+        enter_bottom,
+
+        fn isEnter(self: How) bool {
+            switch (self) {
+                .enter_top, .enter_bottom => return true,
+                .leave_top, .leave_bottom => return false,
+            }
+        }
+    };
+};
+
+pub const CrossWithT = struct {
+    t: f32,
+    cross: PixelCross,
+};
+
+pub fn calcUnsortedSegmentCrosses(segment: ContourSegment, y: f32, pixel_height: f32, events: *[6]CrossWithT) usize {
+    var events_idx: u8 = 0;
+
+    const Case = struct {
+        y: f32,
+        how_map: [2]PixelCross.How,
+    };
+
+    const cases: [2]Case = .{
+        .{ .y = y, .how_map = .{ .leave_top, .enter_top } },
+        .{ .y = y + pixel_height, .how_map = .{ .enter_bottom, .leave_bottom } },
+    };
+
+    for (cases) |case| {
+        const crosses = switch (segment) {
+            .line => |line| lineCrosses(line, case.y),
+            .quad_bezier => |qb| quadBezierCrosses(qb, case.y),
+            .cubic_bezier => |c| cubicBezierCrosses(c, case.y),
+            .arc => |arc| arcCrosses(arc, case.y),
+        };
+
+        for (0..crosses.len) |i| {
+            const res = crosses.buf[i];
+            events[events_idx] = .{
+                .t = res.t,
+                .cross = .{
+                    .x_pos = res.x,
+                    .how = case.how_map[@intFromBool(res.slope_positive)],
+                },
+            };
+            events_idx += 1;
+        }
+    }
+
+    return events_idx;
+}

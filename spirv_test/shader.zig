@@ -9,12 +9,10 @@ const QuadBezier = render_util.QuadBezier;
 const Arc = render_util.Arc;
 
 const Output = extern struct {
-    x: f32,
-    // FIXME: Y might be implicit
-    y: f32,
-    in_typ: u32,
-    positive: u16,
-    valid: u16,
+    x_positions: [6]f32,
+    how: [6]u8,
+    ts: [6]f32,
+    crosses_len: u8,
 };
 
 const F32Array = @SpirvType(.{ .runtime_array = f32 });
@@ -96,9 +94,9 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
     //if (val > num_segments) return;
 
     const item = items.data[val];
-    const crosses, const output_size: u8 = blk: switch (item.arg_type) {
-        // FIXME: named type
-        // line
+
+    // FIXME: For everyone in a warp
+    const segment: render_util.ContourSegment = blk: switch (item.arg_type) {
         0 => {
             const line = Line {
                 .a = .{
@@ -111,7 +109,7 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
                 },
             };
 
-            break :blk .{ render_util.lineCrosses(line, y), 1 };
+            break :blk .{ .line = line };
         },
         1 => {
             const qb = QuadBezier {
@@ -129,7 +127,7 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
                 },
             };
 
-            break :blk .{ render_util.quadBezierCrosses(qb, y), 2 };
+            break :blk .{ .quad_bezier = qb };
         },
         2 => {
             const c = CubicBezier {
@@ -150,7 +148,7 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
                     f32_storage.data[item.arg_offs + 7],
                 },
             };
-            break :blk .{ render_util.cubicBezierCrosses(c, y), 3 };
+            break :blk .{ .cubic_bezier = c };
         },
         3 => {
             const arc = Arc {
@@ -165,32 +163,22 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
                 .delta_theta = f32_storage.data[item.arg_offs + 6],
             };
 
-            break :blk .{ render_util.arcCrosses(arc, y), 2 };
+            break :blk .{ .arc = arc };
         },
         else => {
-            break :blk .{ render_util.CrossSolutionArray.init, 0 };
+            break :blk .{ .line = .{ .a = .{0, 0}, .b = .{0, 0} }};
         },
     };
 
-    for (0..crosses.len) |i| {
-        const cross = crosses.buf[i];
-        output.data[outputs_per_line.* * y_u + item.out_offs + i] = .{
-            .x = cross.x,
-            .y = y,
-            .in_typ = item.arg_type,
-            .positive = @intFromBool(cross.slope_positive),
-            .valid = 1,
-        };
+    var events: [6]render_util.CrossWithT = undefined;
+    const len = render_util.calcUnsortedSegmentCrosses(segment, y, scanline_height.*, &events);
+
+    const od = &output.data[outputs_per_line.* * y_u + item.out_offs];
+    od.crosses_len = @intCast(len);
+    for (0..len) |i| {
+        od.x_positions[i] = events[i].cross.x_pos;
+        od.ts[i] = events[i].t;
+        od.how[i] = @intCast(@intFromEnum(events[i].cross.how));
     }
-
-    for (crosses.len..output_size) |i| {
-        const od = &output.data[outputs_per_line.* * y_u + item.out_offs + i];
-        od.valid = 0;
-        od.x = -std.math.inf(f32);
-        od.y = -std.math.inf(f32);
-    }
-
-    // FIXME: Sort solutions by t
-
 }
 

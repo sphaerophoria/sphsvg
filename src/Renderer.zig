@@ -21,24 +21,7 @@ pub const Line = render_util.Line;
 
 pub const ContourSegment = render_util.ContourSegment;
 
-pub const PixelCross = struct {
-    x_pos: f32,
-    how: How,
-
-    pub const How = enum {
-        leave_top,
-        enter_top,
-        leave_bottom,
-        enter_bottom,
-
-        fn isEnter(self: How) bool {
-            switch (self) {
-                .enter_top, .enter_bottom => return true,
-                .leave_top, .leave_bottom => return false,
-            }
-        }
-    };
-};
+pub const PixelCross = render_util.PixelCross;
 
 pub const WindingChange = struct {
     pos: f32,
@@ -111,7 +94,7 @@ pub const WindingChangeCalculator = struct {
     }
 
     fn appendSortedSegmentCrosses(segment: ContourSegment, y: f32, pixel_height: f32, crosses: *std.ArrayList(PixelCross)) !void {
-        var unsorted_buf: [12]CrossWithT = undefined;
+        var unsorted_buf: [6]CrossWithT = undefined;
         const events = calcUnsortedSegmentCrosses(segment, y, pixel_height, &unsorted_buf);
 
         std.mem.sort(CrossWithT, events, {}, struct {
@@ -125,45 +108,11 @@ pub const WindingChangeCalculator = struct {
         }
     }
 
-    const CrossWithT = struct {
-        t: f32,
-        cross: PixelCross,
-    };
+    const CrossWithT = render_util.CrossWithT;
 
-    fn calcUnsortedSegmentCrosses(segment: ContourSegment, y: f32, pixel_height: f32, events_buf: []CrossWithT) []CrossWithT {
-        var events = std.ArrayList(CrossWithT).initBuffer(events_buf);
-
-        const Case = struct {
-            y: f32,
-            how_map: [2]PixelCross.How,
-        };
-
-        const cases: []const Case = &.{
-            .{ .y = y, .how_map = .{ .leave_top, .enter_top } },
-            .{ .y = y + pixel_height, .how_map = .{ .enter_bottom, .leave_bottom } },
-        };
-
-        for (cases) |case| {
-            const crosses = switch (segment) {
-                .line => |line| render_util.lineCrosses(line, case.y),
-                .quad_bezier => |qb| render_util.quadBezierCrosses(qb, case.y),
-                .cubic_bezier => |c| render_util.cubicBezierCrosses(c, case.y),
-                .arc => |arc| render_util.arcCrosses(arc, case.y),
-            };
-
-            for (0..crosses.len) |i| {
-                const res = crosses.buf[i];
-                events.appendBounded(.{
-                    .t = res.t,
-                    .cross = .{
-                        .x_pos = res.x,
-                        .how = case.how_map[@intFromBool(res.slope_positive)],
-                    },
-                }) catch unreachable;
-            }
-        }
-
-        return events.items;
+    fn calcUnsortedSegmentCrosses(segment: ContourSegment, y: f32, pixel_height: f32, events_buf: *[6]CrossWithT) []CrossWithT {
+        const len = render_util.calcUnsortedSegmentCrosses(segment, y, pixel_height, events_buf);
+        return events_buf[0..len];
     }
 
     const WindingChangeIter = struct {
