@@ -282,10 +282,10 @@ pub const DebugWidget = struct {
 
         gl.glLineWidth(5.0);
 
-        self.solid_color_render_program.renderPoints(self.circle_source, .{
-            .transform = transform.inner,
-            .color = .{ 1, 1, 1 },
-        });
+        //self.solid_color_render_program.renderPoints(self.circle_source, .{
+        //    .transform = transform.inner,
+        //    .color = .{ 1, 1, 1 },
+        //});
 
         const uniforms = Uniforms{
             .path_color = colorVec(self.options.colors.path),
@@ -478,6 +478,7 @@ fn asf32(val: anytype) f32 {
 const Ids = struct {
     output_width: usize,
     output_height: usize,
+    gpu_toggle: usize,
     outline_color: usize,
     enters_color: usize,
     exits_color: usize,
@@ -491,6 +492,7 @@ const Ids = struct {
         return .{
             .output_width = alloc.allocOne(),
             .output_height = alloc.allocOne(),
+            .gpu_toggle = alloc.allocOne(),
             .outline_color = alloc.allocOne(),
             .line_debug_changed = alloc.allocOne(),
             .enters_color = alloc.allocOne(),
@@ -503,6 +505,140 @@ const Ids = struct {
 };
 
 const ids = Ids.init();
+
+pub fn renderSvgGpu(
+    scratch: sphtud.alloc.LinearAllocator,
+    scratch_gl: *sphtud.render.GlAlloc,
+    gen_points_compute_program: gl.GLuint,
+    render_program: sphtud.render.xyt_program.SolidColorProgram,
+    paths: []const ColoredPath,
+    br: Renderer.Point,
+    tl: Renderer.Point,
+    output_width: u31,
+    output_height: u31,
+    tex: sphtud.render.Texture,
+) !void {
+    const gl_cp = scratch_gl.checkpoint();
+    defer scratch_gl.restore(gl_cp);
+
+    const cc = CoordinateConverter{
+        .in_width = br[0] - tl[0],
+        .in_height = br[1] - tl[1],
+        .out_width = @floatFromInt(output_width),
+        .out_height = @floatFromInt(output_height),
+    };
+
+    sphtud.render.setTextureSize(tex, output_width, output_height, .rgbaf32);
+
+    // Once per contour
+    const contour = paths[2].path.get(1);
+    const f32_storage, const items, const out_len = blk2: {
+        const cp = scratch.checkpoint();
+        defer scratch.restore(cp);
+
+        const compute_buffers = try ContourComputeBuffers.init(scratch.allocator(), contour);
+
+        break :blk2 .{
+            try sphtud.render.shader_program.Buffer(f32).init(scratch_gl, compute_buffers.f32_storage),
+            try sphtud.render.shader_program.Buffer(ContourComputeBuffers.Item).init(scratch_gl, compute_buffers.items),
+            compute_buffers.out_len,
+        };
+    };
+
+    const Output = extern struct {
+        x: f32,
+        // FIXME: Y might be implicit
+        y: f32,
+        in_typ: u32,
+        positive: u16,
+        valid: u16,
+    };
+
+    const buf = try scratch_gl.createBuffer();
+    const num_scanlines = output_height;
+    const buf_size_elems = out_len * num_scanlines;
+    const buf_size_bytes = buf_size_elems * @sizeOf(Output);
+    // FIXME: Surely we should be using the named versions of these right?
+    gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, buf);
+    gl.glBufferData(gl.GL_SHADER_STORAGE_BUFFER, buf_size_bytes, null, gl.GL_DYNAMIC_DRAW);
+
+    gl.glUseProgram(gen_points_compute_program);
+    gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 0, f32_storage.vertex_buffer);
+    gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 1, items.vertex_buffer);
+    gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 2, buf);
+
+
+
+    gl.glUniform1ui(0, out_len);
+    const scanline_height = cc.out_height / cc.in_height;
+    gl.glUniform1f(1, scanline_height);
+
+    gl.glDispatchCompute(@intCast(items.len), num_scanlines, 1);
+    std.debug.print("Num items: {d}\n", .{items.len});
+
+    // Idiot says we need this, didn't think about it
+    gl.glMemoryBarrier(gl.GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | gl.GL_SHADER_STORAGE_BARRIER_BIT);
+
+    //const read_back = try scratch.allocator().alloc(Output, buf_size_elems);
+    //gl.glGetBufferSubData(gl.GL_SHADER_STORAGE_BUFFER, 0, buf_size_bytes, read_back.ptr);
+
+    const image_to_gl_transform = sphtud.math.Transform.scale(
+        2.0 / cc.in_width,
+        2.0 / cc.in_height,
+    ).then(
+        .translate(-1, -1),
+    );
+
+    //for (read_back) |val| {
+    //    if (val.valid == 0) continue;
+    //    if (val.in_typ != 3) continue;
+    //    const transformed = image_to_gl_transform.apply(.{
+    //        val.x, val.y, 1,
+    //    });
+    //    std.debug.print("{any} ({any}\n", .{val, transformed});
+    //}
+    //std.debug.print("out len: {d}\n", .{out_len});
+
+    const vao = try scratch_gl.createArray();
+    // 0. copy our vertices array in a buffer for OpenGL to use
+    gl.glBindBuffer(gl.GL_ARRAY_BUFFER, buf);
+    gl.glBindVertexArray(vao);
+    // 1. then set the vertex attributes pointers
+    gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Output), null);
+    gl.glEnableVertexAttribArray(0);
+
+    const render_source = sphtud.render.xyt_program.RenderSource{
+        .inner = .{
+            .vao = vao,
+            .index_type = null,
+            .len = out_len * num_scanlines,
+        },
+    };
+
+    //var floats: [20 * 4]f32 = undefined;
+    //gl.glGetNamedBufferSubData(buf, 0, 20 * 4 * 4, &floats);
+    //for (0..20) |i| {
+    //    std.debug.print("{any}\n", .{floats[i * 4..][0..4]});
+    //}
+    //
+
+    var fb = try sphtud.render.FramebufferRenderContext.init(tex, null);
+    defer fb.reset();
+
+    var tmp_viewport = sphtud.render.TemporaryViewport.init();
+    defer tmp_viewport.reset();
+    tmp_viewport.setViewport(output_width, output_height);
+
+    gl.glClearColor(0, 0, 0, 0);
+    gl.glClear(gl.GL_COLOR_BUFFER_BIT);
+
+    gl.glPointSize(4.0);
+
+    render_program.renderPoints(render_source, .{
+        .color = .{1, 1, 1},
+        .transform = image_to_gl_transform.inner,
+    });
+}
 
 pub fn renderSvg(
     scratch: sphtud.alloc.LinearAllocator,
@@ -616,6 +752,7 @@ const Gui = struct {
     gui_state: *gui.WidgetState,
     mouse_pos_in_label: *gui.Label,
     mouse_pos_out_label: *gui.Label,
+    gpu_checkbox: *gui.Checkbox,
     runner: *gui.Runner,
 
     pub fn init(
@@ -690,6 +827,10 @@ const Gui = struct {
         var height_slider = try wf.makeDragI32(options.image_height, ids.output_height);
         try prop_grid.append(&height_slider.drag.widget);
 
+        try prop_grid.append(.asWidget(try wf.makeLabel("gpu", .{})));
+        const gpu_checkbox = try wf.makeCheckbox(false, ids.gpu_toggle);
+        try prop_grid.append(&gpu_checkbox.widget);
+
         try prop_grid.append(.asWidget(try wf.makeLabel("outline", .{})));
         var path_color_picker = try wf.makeColorPicker(.white, ids.outline_color);
         try prop_grid.append(&path_color_picker.widget);
@@ -751,6 +892,7 @@ const Gui = struct {
             .show_outlines = show_outlines,
             .mouse_pos_in_label = mouse_pos_in_label,
             .mouse_pos_out_label = mouse_pos_out_label,
+            .gpu_checkbox = gpu_checkbox,
             .runner = runner,
         };
     }
@@ -884,6 +1026,31 @@ const ContourComputeBuffers = struct {
     }
 };
 
+fn genGenPointsComputeProgram(gl_alloc: *sphtud.render.GlAlloc) !gl.GLuint {
+    // FIXME: does it make sense to have gl_alloc.createShader() + batch free
+    // eh it's probably fine
+    const compute_shader = gl.glCreateShader(gl.GL_COMPUTE_SHADER);
+    defer gl.glDeleteShader(compute_shader);
+
+    gl.glShaderSource(compute_shader, 1, @ptrCast(&compute_shader_src), null);
+    const shader_binary = @embedFile("shader.spv");
+    gl.glShaderBinary(1, &compute_shader, gl.GL_SHADER_BINARY_FORMAT_SPIR_V_ARB, shader_binary, shader_binary.len);
+    gl.glCompileShader(compute_shader);
+    gl.glSpecializeShader(compute_shader, "main", 0, 0, 0);
+
+    var compiled: c_int = 0;
+    gl.glGetShaderiv(compute_shader, gl.GL_COMPILE_STATUS, &compiled);
+    if (compiled == 0)
+        return error.CompilationFailed;
+
+    const program = try gl_alloc.createProgram();
+    gl.glAttachShader(program, compute_shader);
+    gl.glLinkProgram(program);
+    try sphtud.render.checkProgramLink(program);
+
+    return program;
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     var args = init.args.iterate();
     _ = args.next();
@@ -958,20 +1125,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
+    const gen_points_compute_program = try genGenPointsComputeProgram(&allocators.root_gl);
+
     const generated_circle = blk: {
-        const compute_shader = gl.glCreateShader(gl.GL_COMPUTE_SHADER);
-        defer gl.glDeleteShader(compute_shader);
-
-        gl.glShaderSource(compute_shader, 1, @ptrCast(&compute_shader_src), null);
-        const shader_binary = @embedFile("shader.spv");
-        gl.glShaderBinary(1, &compute_shader, gl.GL_SHADER_BINARY_FORMAT_SPIR_V_ARB, shader_binary, shader_binary.len);
-        gl.glCompileShader(compute_shader);
-        gl.glSpecializeShader(compute_shader, "main", 0, 0, 0);
-
-        var compiled: c_int = 0;
-        gl.glGetShaderiv(compute_shader, gl.GL_COMPILE_STATUS, &compiled);
-        if (compiled == 0)
-            return error.CompilationFailed;
 
         // Once per contour
         const contour = paths.items[2].path.get(1);
@@ -987,11 +1143,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 compute_buffers.out_len,
             };
         };
-
-        const program = try allocators.root_gl.createProgram();
-        gl.glAttachShader(program, compute_shader);
-        gl.glLinkProgram(program);
-        try sphtud.render.checkProgramLink(program);
 
         const Output = extern struct {
             x: f32,
@@ -1010,7 +1161,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, buf);
         gl.glBufferData(gl.GL_SHADER_STORAGE_BUFFER, buf_size_bytes, null, gl.GL_DYNAMIC_DRAW);
 
-        gl.glUseProgram(program);
+        gl.glUseProgram(gen_points_compute_program);
         gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 0, f32_storage.vertex_buffer);
         gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 1, items.vertex_buffer);
         gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 2, buf);
@@ -1175,6 +1326,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 text = try std.fmt.bufPrint(&buf, "{d:.2},{d:.2}", .{ in_x, in_y });
                 try ui.mouse_pos_in_label.setText(text);
             },
+            ids.gpu_toggle => {
+                wants_rerender |= true;
+                std.debug.print("{any}\n", .{ui.gpu_checkbox.checked});
+            },
             else => unreachable,
         };
 
@@ -1182,15 +1337,30 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         ui.gui_state.event_queue.clearRetainingCapacity();
         if (wants_rerender) {
-            try renderSvg(
-                allocators.scratch.linear(),
-                &renderer,
-                paths.items,
-                options.path_mask,
-                @intCast(options.image_width),
-                @intCast(options.image_height),
-                ui.debug_widget.tex,
-            );
+            if (ui.gpu_checkbox.checked) {
+                try renderSvgGpu(
+                    allocators.scratch.linear(),
+                    &allocators.scratch_gl,
+                    gen_points_compute_program,
+                    ui.debug_widget.solid_color_render_program.*,
+                    paths.items,
+                    renderer.br,
+                    renderer.tl,
+                    @intCast(options.image_width),
+                    @intCast(options.image_height),
+                    ui.debug_widget.tex,
+                );
+            } else {
+                try renderSvg(
+                    allocators.scratch.linear(),
+                    &renderer,
+                    paths.items,
+                    options.path_mask,
+                    @intCast(options.image_width),
+                    @intCast(options.image_height),
+                    ui.debug_widget.tex,
+                );
+            }
         }
 
         if (wants_line_debug) {

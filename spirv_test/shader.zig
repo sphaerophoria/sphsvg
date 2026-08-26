@@ -61,9 +61,14 @@ const output = @extern(*addrspace(.storage_buffer) OutputBuffer, .{
     .decoration = .{ .descriptor = .{ .set = 0, .binding = 2 } },
 });
 
-const outputs_per_line = @extern(*addrspace(.uniform) u32, .{
+const outputs_per_line = @extern(*addrspace(.constant) u32, .{
     .name = "outputs_per_line",
-    .decoration = .{ .descriptor = .{ .set = 0, .binding = 0 } },
+    .decoration = .{ .location = 0 },
+});
+
+const scanline_height = @extern(*addrspace(.constant) f32, .{
+    .name = "scanline_height",
+    .decoration = .{ .location = 1 },
 });
 
 const math = std.math;
@@ -79,14 +84,14 @@ const mem = std.mem;
 //          [y] "" (y),
 //    );
 //}
-var x: u32 = 4;
 
 export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
     const val = std.spirv.global_invocation_id[0];
     const y_u = std.spirv.global_invocation_id[1];
-    const y: f32 = @floatFromInt(y_u);
 
-    _ = @atomicRmw(u32, &x, .Add, 1, .acquire);
+    var y: f32 = @floatFromInt(y_u);
+    y *= scanline_height.*;
+
     // FIXME: Set upper bound
     //if (val > num_segments) return;
 
@@ -177,8 +182,12 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
             .valid = 1,
         };
     }
+
     for (crosses.len..output_size) |i| {
-        output.data[outputs_per_line.* * y_u + item.out_offs + i].valid = 0;
+        const od = &output.data[outputs_per_line.* * y_u + item.out_offs + i];
+        od.valid = 0;
+        od.x = -std.math.inf(f32);
+        od.y = -std.math.inf(f32);
     }
 
     // FIXME: Sort solutions by t
