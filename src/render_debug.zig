@@ -546,12 +546,10 @@ pub fn renderSvgGpu(
     };
 
     const Output = extern struct {
-        x: f32,
-        // FIXME: Y might be implicit
-        y: f32,
-        in_typ: u32,
-        positive: u16,
-        valid: u16,
+        x_positons: [6]f32,
+        how: [6]u8,
+        ts: [6]f32,
+        crosses_len: u8,
     };
 
     const buf = try scratch_gl.createBuffer();
@@ -579,8 +577,8 @@ pub fn renderSvgGpu(
     // Idiot says we need this, didn't think about it
     gl.glMemoryBarrier(gl.GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | gl.GL_SHADER_STORAGE_BARRIER_BIT);
 
-    //const read_back = try scratch.allocator().alloc(Output, buf_size_elems);
-    //gl.glGetBufferSubData(gl.GL_SHADER_STORAGE_BUFFER, 0, buf_size_bytes, read_back.ptr);
+    const read_back = try scratch.allocator().alloc(Output, buf_size_elems);
+    gl.glGetBufferSubData(gl.GL_SHADER_STORAGE_BUFFER, 0, buf_size_bytes, read_back.ptr);
 
     const image_to_gl_transform = sphtud.math.Transform.scale(
         2.0 / cc.in_width,
@@ -589,15 +587,12 @@ pub fn renderSvgGpu(
         .translate(-1, -1),
     );
 
-    //for (read_back) |val| {
-    //    if (val.valid == 0) continue;
-    //    if (val.in_typ != 3) continue;
-    //    const transformed = image_to_gl_transform.apply(.{
-    //        val.x, val.y, 1,
-    //    });
-    //    std.debug.print("{any} ({any}\n", .{val, transformed});
-    //}
-    //std.debug.print("out len: {d}\n", .{out_len});
+    for (read_back) |val| {
+        for (0..val.crosses_len) |i| {
+            std.debug.print("{any}\n", .{val.ts[i]});
+        }
+    }
+    std.debug.print("out len: {d}\n", .{out_len});
 
     const vao = try scratch_gl.createArray();
     // 0. copy our vertices array in a buffer for OpenGL to use
