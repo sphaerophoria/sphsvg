@@ -17,15 +17,26 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("sphtud/sphtud.zig"),
     });
 
-    const shader = b.addExecutable(.{
-        .name = "shader",
+    const pass1 = b.addExecutable(.{
+        .name = "pass1",
         .root_module = b.createModule(.{
             .root_source_file = b.path("shader.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
-    shader.root_module.addImport("sphtud", sphtud);
+    pass1.root_module.addImport("sphtud", sphtud);
+    b.installArtifact(pass1);
 
-    b.installArtifact(shader);
+    const pass2 = b.addExecutable(.{
+        .name = "pass2",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("pass2.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    pass2.root_module.addImport("sphtud", sphtud);
+    b.installArtifact(pass2);
+
 }

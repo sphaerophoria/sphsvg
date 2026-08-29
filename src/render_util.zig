@@ -7,6 +7,14 @@ const builtin = @import("builtin");
 pub const Point = sphtud.math.Vec2;
 pub const Line = sphtud.geometry.Line2;
 
+// 1. Don't use unions
+// 2. Force physical memory location
+// 3. Manual packing
+//    * [20]u8
+//    * walk struct
+//    * serialize/deserilaize into that []u8
+// 4. Treat unions like structs and hope the compiler figures it out
+
 pub const CubicBezier = struct {
     start: Point,
     c1: Point,
@@ -49,11 +57,89 @@ pub const Arc = struct {
     }
 };
 
-pub const ContourSegment = union(enum) {
-    line: Line,
-    cubic_bezier: CubicBezier,
-    quad_bezier: QuadBezier,
-    arc: Arc,
+pub const ContourSegment = struct {
+    kind: enum { line, cubic_bezier, quad_bezier, arc },
+    storage: [8]f32,
+
+    fn padding(comptime len: usize) [len]f32 {
+        return undefined;
+    }
+
+    pub fn initLine(l: Line) ContourSegment {
+        return ContourSegment{
+            .kind = .line,
+            .storage = [4]f32{
+                l.a[0], l.a[1], l.b[0], l.b[1],
+            } ++ padding(4),
+        };
+    }
+
+    pub fn asLine(self: ContourSegment) Line {
+        return .{
+            .a = .{ self.storage[0], self.storage[1] },
+            .b = .{ self.storage[2], self.storage[3] },
+        };
+    }
+
+    pub fn initCubicBezier(c: CubicBezier) ContourSegment {
+        return ContourSegment{
+            .kind = .cubic_bezier,
+            .storage = [8]f32 {
+                c.start[0], c.start[1],
+                c.c1[0], c.c1[1],
+                c.c2[0], c.c2[1],
+                c.end[0], c.end[1],
+            },
+        };
+    }
+
+    pub fn asCubicBezier(self: ContourSegment) CubicBezier {
+        return .{
+            .start = .{ self.storage[0], self.storage[1] },
+            .c1 = .{ self.storage[2], self.storage[3] },
+            .c2 = .{ self.storage[4], self.storage[5] },
+            .end = .{ self.storage[6], self.storage[7] },
+        };
+    }
+
+    pub fn initQuadBezier(q: QuadBezier) ContourSegment {
+        return ContourSegment{
+            .kind = .quad_bezier,
+            .storage = [6]f32 {
+                q.start[0], q.start[1],
+                q.c[0], q.c[1],
+                q.end[0], q.end[1],
+            } ++ padding(2),
+        };
+    }
+
+    pub fn asQuadBezier(self: ContourSegment) QuadBezier {
+        return .{
+            .start = .{ self.storage[0], self.storage[1] },
+            .c = .{ self.storage[2], self.storage[3] },
+            .end = .{ self.storage[4], self.storage[5] },
+        };
+    }
+
+    pub fn initArc(a: Arc) ContourSegment {
+        return ContourSegment{
+            .kind = .arc,
+            .storage = [7]f32 {
+                a.rot, a.rx, a.ry, a.center[0], a.center[1], a.start_theta, a.delta_theta,
+            } ++ padding(1),
+        };
+    }
+
+    pub fn asArc(self: ContourSegment) Arc {
+        return .{
+            .rot = self.storage[0],
+            .rx = self.storage[1],
+            .ry = self.storage[2],
+            .center = .{ self.storage[3], self.storage[4] },
+            .start_theta = self.storage[5],
+            .delta_theta = self.storage[6],
+        };
+    }
 };
 
 pub const CrossSolution = struct {
@@ -406,11 +492,11 @@ pub fn calcUnsortedSegmentCrosses(segment: ContourSegment, y: f32, pixel_height:
     };
 
     for (cases) |case| {
-        const crosses = switch (segment) {
-            .line => |line| lineCrosses(line, case.y),
-            .quad_bezier => |qb| quadBezierCrosses(qb, case.y),
-            .cubic_bezier => |c| cubicBezierCrosses(c, case.y),
-            .arc => |arc| arcCrosses(arc, case.y),
+        const crosses = switch (segment.kind) {
+            .line => lineCrosses(segment.asLine(), case.y),
+            .quad_bezier =>  quadBezierCrosses(segment.asQuadBezier(), case.y),
+            .cubic_bezier => cubicBezierCrosses(segment.asCubicBezier(), case.y),
+            .arc => arcCrosses(segment.asArc(), case.y),
         };
 
         for (0..crosses.len) |i| {

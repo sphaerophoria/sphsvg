@@ -1,19 +1,13 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
 const render_util = @import("render_util.zig");
+const Output = @import("Pass1Output.zig");
 
 const Line = render_util.Line;
 const Vec2 = sphtud.math.Vec2;
 const CubicBezier = render_util.CubicBezier;
 const QuadBezier = render_util.QuadBezier;
 const Arc = render_util.Arc;
-
-const Output = extern struct {
-    x_positions: [6]f32,
-    how: [6]u8,
-    ts: [6]f32,
-    crosses_len: u8,
-};
 
 const F32Array = @SpirvType(.{ .runtime_array = f32 });
 const OutputArray = @SpirvType(.{ .runtime_array = Output });
@@ -72,17 +66,6 @@ const scanline_height = @extern(*addrspace(.constant) f32, .{
 const math = std.math;
 const mem = std.mem;
 
-//fn atan2(x: f32, y: f32) f32 {
-//    return asm volatile (
-//        \\%inst_set = OpExtInstImport "GLSL.std.450"
-//        \\%ret = OpExtInst %Result %inst_set 25 %y %x
-//        : [ret] "" (-> f32),
-//        : [Result] "t" (f32),
-//          [x] "" (x),
-//          [y] "" (y),
-//    );
-//}
-
 export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
     const val = std.spirv.global_invocation_id[0];
     const y_u = std.spirv.global_invocation_id[1];
@@ -96,6 +79,8 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
     const item = items.data[val];
 
     // FIXME: For everyone in a warp
+    // FIXME: Storage could probably just hold render_util.ContourSegment
+    // directly saving us from having to do the unpack here
     const segment: render_util.ContourSegment = blk: switch (item.arg_type) {
         0 => {
             const line = Line {
@@ -109,7 +94,7 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
                 },
             };
 
-            break :blk .{ .line = line };
+            break :blk .initLine(line);
         },
         1 => {
             const qb = QuadBezier {
@@ -127,7 +112,7 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
                 },
             };
 
-            break :blk .{ .quad_bezier = qb };
+            break :blk .initQuadBezier(qb);
         },
         2 => {
             const c = CubicBezier {
@@ -148,7 +133,7 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
                     f32_storage.data[item.arg_offs + 7],
                 },
             };
-            break :blk .{ .cubic_bezier = c };
+            break :blk .initCubicBezier(c);
         },
         3 => {
             const arc = Arc {
@@ -163,10 +148,10 @@ export fn main() callconv(.{ .spirv_kernel = .{.x = 1, .y = 1, .z = 1} }) void {
                 .delta_theta = f32_storage.data[item.arg_offs + 6],
             };
 
-            break :blk .{ .arc = arc };
+            break :blk .initArc(arc);
         },
         else => {
-            break :blk .{ .line = .{ .a = .{0, 0}, .b = .{0, 0} }};
+            break :blk .initLine(.{ .a = .{0, 0}, .b = .{0, 0} });
         },
     };
 

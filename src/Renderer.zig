@@ -238,12 +238,13 @@ pub const PathLineIter = struct {
     pub fn next(self: *PathLineIter) ?Line {
         while (true) {
             if (self.t_idx < line_segments) {
-                switch (self.current_segment) {
-                    .line => |m| {
+                switch (self.current_segment.kind) {
+                    .line =>  {
                         self.t_idx = line_segments;
-                        return m;
+                        return self.current_segment.asLine();
                     },
-                    .cubic_bezier => |bezier| {
+                    .cubic_bezier => {
+                        const bezier = self.current_segment.asCubicBezier();
                         defer self.t_idx += 1;
 
                         if (self.t_idx == 0) {
@@ -260,7 +261,8 @@ pub const PathLineIter = struct {
                             .b = p,
                         };
                     },
-                    .quad_bezier => |bezier| {
+                    .quad_bezier => {
+                        const bezier = self.current_segment.asQuadBezier();
                         defer self.t_idx += 1;
 
                         if (self.t_idx == 0) {
@@ -277,7 +279,8 @@ pub const PathLineIter = struct {
                             .b = p,
                         };
                     },
-                    .arc => |arc| {
+                    .arc => {
+                        const arc = self.current_segment.asArc();
                         defer self.t_idx += 1;
 
                         const applier = arc.applier();

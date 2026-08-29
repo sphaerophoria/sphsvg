@@ -25,69 +25,61 @@ pub fn svgPathToRenderPath(arena: std.mem.Allocator, expansion: sphtud.util.Expa
             .abs_line => |m| {
                 const start = cursor;
                 cursor = m;
-                try contour.append(.{
-                    .line = .{
-                        .a = start,
-                        .b = cursor,
-                    },
-                });
+                try contour.append(.initLine(.{
+                    .a = start,
+                    .b = cursor,
+                }));
             },
             .abs_horizontal_line => |x| {
                 const start = cursor;
                 cursor[0] = x;
-                try contour.append(.{ .line = .{
+                try contour.append(.initLine(.{
                     .a = start,
                     .b = cursor,
-                } });
+                }));
             },
             .abs_vertical_line => |y| {
                 const start = cursor;
                 cursor[1] = y;
-                try contour.append(.{ .line = .{
+                try contour.append(.initLine(.{
                     .a = start,
                     .b = cursor,
-                } });
+                }));
             },
             .abs_cubic_bezier => |b| {
                 const start = cursor;
                 cursor = b[2];
-                try contour.append(.{
-                    .cubic_bezier = .{
+                try contour.append(.initCubicBezier(.{
                         .start = start,
                         .c1 = b[0],
                         .c2 = b[1],
                         .end = b[2],
-                    },
-                });
+                }));
             },
             .abs_quad_bezier => |b| {
                 const start = cursor;
                 cursor = b[1];
-                try contour.append(.{
-                    .quad_bezier = .{
+                try contour.append(.initQuadBezier(.{
                         .start = start,
                         .c = b[0],
                         .end = b[1],
-                    },
-                });
+                }));
             },
             .abs_cubic_bezier_seq => |b| {
                 const c1 = reflectCubicBezier(cursor, b[0], b[1]);
 
-                try contour.append(.{
-                    .cubic_bezier = .{
+                try contour.append(.initCubicBezier(.{
                         .start = cursor,
                         .c1 = c1,
                         .c2 = b[0],
                         .end = b[1],
-                    },
-                });
+                }));
                 cursor = b[1];
             },
             .abs_arc => |params| {
-                try contour.append(.{
-                    .arc = svgToRenderArc(cursor, params),
-                });
+                try contour.append(.initArc(
+                   svgToRenderArc(cursor, params),
+                ));
 
                 cursor = params.end;
             },
@@ -100,26 +92,26 @@ pub fn svgPathToRenderPath(arena: std.mem.Allocator, expansion: sphtud.util.Expa
             .rel_line => |m| {
                 const start = cursor;
                 cursor += m;
-                try contour.append(.{ .line = .{
+                try contour.append(.initLine(.{
                     .a = start,
                     .b = cursor,
-                } });
+                }));
             },
             .rel_horizontal_line => |x| {
                 const start = cursor;
                 cursor[0] += x;
-                try contour.append(.{ .line = .{
+                try contour.append(.initLine(.{
                     .a = start,
                     .b = cursor,
-                } });
+                }));
             },
             .rel_vertical_line => |y| {
                 const start = cursor;
                 cursor[1] += y;
-                try contour.append(.{ .line = .{
+                try contour.append(.initLine(.{
                     .a = start,
                     .b = cursor,
-                } });
+                }));
             },
             .rel_cubic_bezier => |b| {
                 const start = cursor;
@@ -127,41 +119,35 @@ pub fn svgPathToRenderPath(arena: std.mem.Allocator, expansion: sphtud.util.Expa
                 const c2 = cursor + b[1];
                 cursor += b[2];
 
-                try contour.append(.{
-                    .cubic_bezier = .{
+                try contour.append(.initCubicBezier(.{
                         .start = start,
                         .c1 = c1,
                         .c2 = c2,
                         .end = cursor,
-                    },
-                });
+                }));
             },
             .rel_quad_bezier => |b| {
                 const start = cursor;
                 const c = cursor + b[0];
                 cursor += b[1];
 
-                try contour.append(.{
-                    .quad_bezier = .{
+                try contour.append(.initQuadBezier(.{
                         .start = start,
                         .c = c,
                         .end = cursor,
-                    },
-                });
+                }));
             },
             .rel_cubic_bezier_seq => |b| {
                 const end = cursor + b[1];
                 const c2 = cursor + b[0];
                 const c1 = reflectCubicBezier(cursor, c2, end);
 
-                try contour.append(.{
-                    .cubic_bezier = .{
-                        .start = cursor,
-                        .c1 = c1,
-                        .c2 = c2,
-                        .end = end,
-                    },
-                });
+                try contour.append(.initCubicBezier(.{
+                    .start = cursor,
+                    .c1 = c1,
+                    .c2 = c2,
+                    .end = end,
+                }));
                 cursor += b[1];
             },
             .rel_arc => |rel_params| {
@@ -174,19 +160,16 @@ pub fn svgPathToRenderPath(arena: std.mem.Allocator, expansion: sphtud.util.Expa
                     .end = cursor + rel_params.end,
                 };
 
-                try contour.append(.{
-                    .arc = svgToRenderArc(cursor, params),
-                });
-
+                try contour.append(.initArc(
+                    svgToRenderArc(cursor, params),
+                ));
                 cursor = params.end;
             },
             .close => {
-                try contour.append(.{
-                    .line = .{
-                        .a = cursor,
-                        .b = cursor_start,
-                    },
-                });
+                try contour.append(.initLine(.{
+                    .a = cursor,
+                    .b = cursor_start,
+                }));
             },
         }
     }

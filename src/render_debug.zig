@@ -435,11 +435,18 @@ pub const DebugWidget = struct {
             while (path_it.next()) |contour| {
                 var segment_it = contour.iter();
                 while (segment_it.next()) |segment| {
-                    const l: Renderer.Line = switch (segment.*) {
-                        .line => |l| l,
-                        .cubic_bezier => |c| .{ .a = c.start, .b = c.end },
-                        .quad_bezier => |b| .{ .a = b.start, .b = b.end },
-                        .arc => |arc| blk: {
+                    const l: Renderer.Line = switch (segment.kind) {
+                        .line =>  segment.asLine(),
+                        .cubic_bezier => blk: {
+                            const c = segment.asCubicBezier();
+                            break :blk .{ .a = c.start, .b = c.end };
+                        },
+                        .quad_bezier => blk:{
+                            const b = segment.asQuadBezier();
+                            break :blk .{ .a = b.start, .b = b.end };
+                        },
+                        .arc =>  blk: {
+                            const arc = segment.asArc();
                             const a = arc.applier();
                             break :blk .{
                                 .a = a.apply(arc.start_theta),
@@ -509,7 +516,8 @@ const ids = Ids.init();
 pub fn renderSvgGpu(
     scratch: sphtud.alloc.LinearAllocator,
     scratch_gl: *sphtud.render.GlAlloc,
-    gen_points_compute_program: gl.GLuint,
+    pass_1_program: gl.GLuint,
+    pass_2_program: gl.GLuint,
     render_program: sphtud.render.xyt_program.SolidColorProgram,
     paths: []const ColoredPath,
     br: Renderer.Point,
@@ -532,7 +540,7 @@ pub fn renderSvgGpu(
 
     // Once per contour
     const contour = paths[2].path.get(1);
-    const f32_storage, const items, const out_len = blk2: {
+    const f32_storage, const items, const pass1_line_len = blk2: {
         const cp = scratch.checkpoint();
         defer scratch.restore(cp);
 
@@ -546,57 +554,112 @@ pub fn renderSvgGpu(
     };
 
     const Output = extern struct {
-        x_positons: [6]f32,
+        x_positions: [6]f32,
         how: [6]u8,
         ts: [6]f32,
         crosses_len: u8,
     };
 
-    const buf = try scratch_gl.createBuffer();
+    const pass1_out = try scratch_gl.createBuffer();
     const num_scanlines = output_height;
-    const buf_size_elems = out_len * num_scanlines;
-    const buf_size_bytes = buf_size_elems * @sizeOf(Output);
+    const pass1_size_elems = pass1_line_len * num_scanlines;
+    const pass1_size_bytes = pass1_size_elems * @sizeOf(Output);
     // FIXME: Surely we should be using the named versions of these right?
-    gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, buf);
-    gl.glBufferData(gl.GL_SHADER_STORAGE_BUFFER, buf_size_bytes, null, gl.GL_DYNAMIC_DRAW);
+    gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, pass1_out);
+    gl.glBufferData(gl.GL_SHADER_STORAGE_BUFFER, pass1_size_bytes, null, gl.GL_DYNAMIC_DRAW);
 
-    gl.glUseProgram(gen_points_compute_program);
+    gl.glUseProgram(pass_1_program);
     gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 0, f32_storage.vertex_buffer);
     gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 1, items.vertex_buffer);
-    gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 2, buf);
+    gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 2, pass1_out);
 
 
 
-    gl.glUniform1ui(0, out_len);
+    gl.glUniform1ui(0, pass1_line_len);
     const scanline_height = cc.out_height / cc.in_height;
     gl.glUniform1f(1, scanline_height);
 
-    gl.glDispatchCompute(@intCast(items.len), num_scanlines, 1);
+    gl.glDispatchCompute(1, 1, 1);
     std.debug.print("Num items: {d}\n", .{items.len});
 
     // Idiot says we need this, didn't think about it
-    gl.glMemoryBarrier(gl.GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | gl.GL_SHADER_STORAGE_BARRIER_BIT);
+    gl.glMemoryBarrier(gl.GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | gl.GL_SHADER_STORAGE_BARRIER_BIT |
+        gl.GL_BUFFER_UPDATE_BARRIER_BIT);
 
-    const read_back = try scratch.allocator().alloc(Output, buf_size_elems);
-    gl.glGetBufferSubData(gl.GL_SHADER_STORAGE_BUFFER, 0, buf_size_bytes, read_back.ptr);
+    const read_back = try scratch.allocator().alloc(Output, pass1_size_elems);
+    gl.glGetBufferSubData(gl.GL_SHADER_STORAGE_BUFFER, 0, pass1_size_bytes, read_back.ptr);
 
     const image_to_gl_transform = sphtud.math.Transform.scale(
         2.0 / cc.in_width,
         2.0 / cc.in_height,
-    ).then(
-        .translate(-1, -1),
-    );
+    ).then(.translate(-1, -1));
+
+    // num lines * num_segments
+
+    // for each line
+    // for each segment
+    // output a Output structure
+    //
+    // num lines = num_outputs / num_segments
 
     for (read_back) |val| {
         for (0..val.crosses_len) |i| {
-            std.debug.print("{any}\n", .{val.ts[i]});
+            const how: Renderer.PixelCross.How = @enumFromInt(val.how[i]);
+            std.debug.print("{any}: {d} {t}\n", .{val.ts[i], val.x_positions[i], how});
         }
     }
-    std.debug.print("out len: {d}\n", .{out_len});
+    std.debug.print("out len: {d}\n", .{pass1_line_len});
+
+    // FIXME: Not sure where this should live
+    const Pass2Output = extern struct {
+        hows: [6]u32,
+        idx: u32,
+    };
+
+    comptime {
+        std.debug.assert(@sizeOf(Pass2Output) == 28);
+        std.debug.assert(@offsetOf(Pass2Output, "idx") == 24);
+        std.debug.assert(@offsetOf(Pass2Output, "hows") == 0);
+    }
+
+    const pass2_out = try scratch_gl.createBuffer();
+    const pass2_size_elems = pass1_line_len * num_scanlines;
+    const pass2_size_bytes = pass2_size_elems * @sizeOf(Pass2Output);
+    // FIXME: Surely we should be using the named versions of these right?
+    gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, pass2_out);
+    gl.glBufferData(gl.GL_SHADER_STORAGE_BUFFER, pass2_size_bytes, null, gl.GL_DYNAMIC_DRAW);
+
+    gl.glUseProgram(pass_2_program);
+    gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 0, pass1_out);
+    gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 1, pass2_out);
+
+    gl.glUniform1ui(0, pass1_line_len);
+
+    gl.glDispatchCompute(pass1_line_len, 1, 1);
+
+    // Idiot says we need this, didn't think about it
+    gl.glMemoryBarrier(
+        gl.GL_SHADER_STORAGE_BARRIER_BIT |
+        gl.GL_BUFFER_UPDATE_BARRIER_BIT
+    );
+
+    const read_back_2 = try scratch.allocator().alloc(Pass2Output, pass2_size_elems);
+    gl.glGetBufferSubData(gl.GL_SHADER_STORAGE_BUFFER, 0, pass2_size_bytes, read_back_2.ptr);
+
+    std.debug.print("read back 2: {any}\n", .{read_back_2[0..10]});
+    std.debug.print("read back 2 raw: {any}\n", .{std.mem.asBytes(read_back_2[0..10])});
+    for (0..read_back_2.len) |i| {
+        std.debug.print("expected {any} got {any}\n", .{read_back[i].how, read_back_2[i].hows});
+        std.debug.print("item {d}\n", .{i});
+        std.debug.print("scanline {d}\n", .{i / pass1_line_len});
+        for (0..6) |j| {
+            std.debug.assert(read_back[i].how[j] == read_back_2[i].hows[j]);
+        }
+    }
 
     const vao = try scratch_gl.createArray();
     // 0. copy our vertices array in a buffer for OpenGL to use
-    gl.glBindBuffer(gl.GL_ARRAY_BUFFER, buf);
+    gl.glBindBuffer(gl.GL_ARRAY_BUFFER, pass1_out);
     gl.glBindVertexArray(vao);
     // 1. then set the vertex attributes pointers
     gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, @sizeOf(Output), null);
@@ -606,7 +669,7 @@ pub fn renderSvgGpu(
         .inner = .{
             .vao = vao,
             .index_type = null,
-            .len = out_len * num_scanlines,
+            .len = pass1_line_len * num_scanlines,
         },
     };
 
@@ -929,8 +992,9 @@ const ContourComputeBuffers = struct {
         var out_idx: u32 = 0;
 
         var it = contour.iter();
-        while (it.next()) |segment| switch (segment.*) {
-            .line => |l| {
+        while (it.next()) |segment| switch (segment.kind) {
+            .line => {
+                const l = segment.asLine();
                 items.appendBounded(.{
                     .arg_start_offs = @intCast(f32_storage.items.len),
                     // FIXME: Shared constants somewhere?
@@ -944,7 +1008,8 @@ const ContourComputeBuffers = struct {
                 // FIXME: Shared constants somewhere?
                 out_idx += 1;
             },
-            .quad_bezier => |qb| {
+            .quad_bezier =>  {
+                const qb = segment.asQuadBezier();
                 items.appendBounded(.{
                     .arg_start_offs = @intCast(f32_storage.items.len),
                     .typ = 1,
@@ -960,7 +1025,8 @@ const ContourComputeBuffers = struct {
                 // FIXME: Shared constants somewhere?
                 out_idx += 2;
             },
-            .cubic_bezier => |cb| {
+            .cubic_bezier => {
+                const cb = segment.asCubicBezier();
                 items.appendBounded(.{
                     .arg_start_offs = @intCast(f32_storage.items.len),
                     // FIXME: Shared constants somewhere?
@@ -979,7 +1045,8 @@ const ContourComputeBuffers = struct {
                 // FIXME: Shared constants somewhere?
                 out_idx += 3;
             },
-            .arc => |arc| {
+            .arc => {
+                const arc = segment.asArc();
                 items.appendBounded(.{
                     .arg_start_offs = @intCast(f32_storage.items.len),
                     // FIXME: Shared constants somewhere?
@@ -1021,16 +1088,15 @@ const ContourComputeBuffers = struct {
     }
 };
 
-fn genGenPointsComputeProgram(gl_alloc: *sphtud.render.GlAlloc) !gl.GLuint {
+fn genCmoputeProgram(gl_alloc: *sphtud.render.GlAlloc, shader_binary: []const u8) !gl.GLuint {
     // FIXME: does it make sense to have gl_alloc.createShader() + batch free
     // eh it's probably fine
     const compute_shader = gl.glCreateShader(gl.GL_COMPUTE_SHADER);
     defer gl.glDeleteShader(compute_shader);
 
+
     gl.glShaderSource(compute_shader, 1, @ptrCast(&compute_shader_src), null);
-    const shader_binary = @embedFile("shader.spv");
-    gl.glShaderBinary(1, &compute_shader, gl.GL_SHADER_BINARY_FORMAT_SPIR_V_ARB, shader_binary, shader_binary.len);
-    gl.glCompileShader(compute_shader);
+    gl.glShaderBinary(1, &compute_shader, gl.GL_SHADER_BINARY_FORMAT_SPIR_V_ARB, shader_binary.ptr, @intCast(shader_binary.len));
     gl.glSpecializeShader(compute_shader, "main", 0, 0, 0);
 
     var compiled: c_int = 0;
@@ -1044,6 +1110,24 @@ fn genGenPointsComputeProgram(gl_alloc: *sphtud.render.GlAlloc) !gl.GLuint {
     try sphtud.render.checkProgramLink(program);
 
     return program;
+}
+
+fn genPass1Program(gl_alloc: *sphtud.render.GlAlloc) !gl.GLuint {
+    return genCmoputeProgram(gl_alloc, @embedFile("pass1.spv"));
+}
+
+fn genPass2Program(gl_alloc: *sphtud.render.GlAlloc) !gl.GLuint {
+    return genCmoputeProgram(gl_alloc, @embedFile("pass2.spv"));
+}
+fn onGlMessage(source: gl.GLenum, @"type": gl.GLenum, id: gl.GLuint, severity: gl.GLenum, length: gl.GLsizei, message: [*c]const gl.GLchar, userParam: ?*const anyopaque) callconv(.c) void {
+    _ = source;
+    _ = @"type";
+    _ = id;
+    _ = severity;
+    _ = length;
+    _ = userParam;
+    std.debug.print("Gl message: {s}\n", .{message});
+    std.os.linux.exit(1);
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -1062,6 +1146,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     gl.glEnable(gl.GL_SCISSOR_TEST);
     gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA);
     gl.glEnable(gl.GL_BLEND);
+    gl.glEnable(gl.GL_DEBUG_OUTPUT);
+    gl.glEnable(gl.GL_DEBUG_OUTPUT_SYNCHRONOUS);
+    gl.glDebugMessageCallback(onGlMessage, null);
+
 
     const view_box, const paths = blk: {
         var paths = std.ArrayList(ColoredPath).empty;
@@ -1120,7 +1208,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
-    const gen_points_compute_program = try genGenPointsComputeProgram(&allocators.root_gl);
+    const pass_1_program = try genPass1Program(&allocators.root_gl);
+    const pass_2_program = try genPass2Program(&allocators.root_gl);
 
     const generated_circle = blk: {
 
@@ -1156,7 +1245,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         gl.glBindBuffer(gl.GL_SHADER_STORAGE_BUFFER, buf);
         gl.glBufferData(gl.GL_SHADER_STORAGE_BUFFER, buf_size_bytes, null, gl.GL_DYNAMIC_DRAW);
 
-        gl.glUseProgram(gen_points_compute_program);
+        gl.glUseProgram(pass_1_program);
         gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 0, f32_storage.vertex_buffer);
         gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 1, items.vertex_buffer);
         gl.glBindBufferBase(gl.GL_SHADER_STORAGE_BUFFER, 2, buf);
@@ -1336,7 +1425,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 try renderSvgGpu(
                     allocators.scratch.linear(),
                     &allocators.scratch_gl,
-                    gen_points_compute_program,
+                    pass_1_program,
+                    pass_2_program,
                     ui.debug_widget.solid_color_render_program.*,
                     paths.items,
                     renderer.br,
